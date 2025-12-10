@@ -166,7 +166,7 @@ class SACAgent:
         act_dim,
         act_low,
         act_high,
-        device="cpu",
+        device,
         config: SACConfig = SACConfig(),
     ):
         self.device = device
@@ -186,12 +186,19 @@ class SACAgent:
 
         if config.auto_alpha:
             self.log_alpha = torch.tensor(
-                np.log(config.init_alpha), requires_grad=True, device=device
+                np.log(config.init_alpha),
+                dtype=torch.float32,
+                requires_grad=True,
+                device=device,
             )
             self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=config.alpha_lr)
             self.target_entropy = -config.target_entropy_scale * act_dim
         else:
-            self.log_alpha = torch.tensor(np.log(config.init_alpha), device=device)
+            self.log_alpha = torch.tensor(
+                np.log(config.init_alpha),
+                dtype=torch.float32,
+                device=device,
+            )
             self.alpha_opt = None
             self.target_entropy = None
 
@@ -456,7 +463,7 @@ def train(
     task_name: str = "reach-v3",
     total_steps: int = 200_000,
     start_steps: int = 10_000,
-    batch_size: int = 1024,
+    batch_size: int = 2048,
     eval_interval: int = 10_000,
     seed: int = 0,
     target_return: float | None = None,  # e.g. 250.0 or None
@@ -464,7 +471,11 @@ def train(
 ):
 
     set_seed(seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available() else "cpu"
+    )
 
     env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(task_name, seed)
     replay_buffer = ReplayBuffer(obs_dim, act_dim, size=int(1e6))
