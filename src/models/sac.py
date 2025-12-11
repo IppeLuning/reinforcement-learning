@@ -6,8 +6,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.utils as nn_utils  # for gradient clipping
 
 from src.utils.mlp import MLP
+from src.utils.normalizer import RunningNormalizer
 
 
 class SACActor(nn.Module):
@@ -41,8 +43,10 @@ class SACActor(nn.Module):
         z = normal.rsample()
         tanh_z = torch.tanh(z)
 
+        # Scale from [-1, 1] to [act_low, act_high]
         action = self.act_low + (tanh_z + 1.0) * 0.5 * (self.act_high - self.act_low)
 
+        # Log-prob with tanh correction
         log_prob = normal.log_prob(z) - torch.log(1 - tanh_z.pow(2) + 1e-6)
         log_prob = log_prob.sum(dim=-1, keepdim=True)
         return action, log_prob
@@ -68,13 +72,23 @@ class QNetwork(nn.Module):
 class SACConfig:
     gamma: float = 0.99
     tau: float = 0.005
-    actor_lr: float = 3e-4
-    critic_lr: float = 3e-4
-    alpha_lr: float = 3e-4
-    target_entropy_scale: float = 1.0  # target_entropy = -scale * act_dim
+
+    # More conservative defaults
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
+    alpha_lr: float = 5e-5
+
+    # Less aggressive entropy target by default
+    target_entropy_scale: float = 0.5  # target_entropy = -scale * act_dim
+
     auto_alpha: bool = True
     init_alpha: float = 0.2
     hidden_dims: Tuple[int, ...] = (256, 256)
+
+    # stability hooks
+    alpha_min: float = 1e-4
+    alpha_max: float = 10.0
+    max_grad_norm: float = 1.0
 
 
 class SACAgent:
@@ -90,7 +104,11 @@ class SACAgent:
         self.device = device
         self.config = config
 
-        # Extract hidden_dims from config to pass to networks
+        # If you use the lazy normalizer version:
+        self.obs_normalizer = RunningNormalizer(device=device)
+        # If your normalizer takes obs_dim in __init__, use instead:
+        # self.obs_normalizer = RunningNormalizer(obs_dim, device=device)
+
         h_dims = config.hidden_dims
 
         self.actor = SACActor(
@@ -136,34 +154,53 @@ class SACAgent:
         return self.log_alpha.exp()
 
     def select_action(self, obs, eval_mode: bool = False):
+        """
+        Returns a numpy array of shape (act_dim,), never None.
+        """
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(
             0
         )
+
         with torch.no_grad():
+            norm_obs = self.obs_normalizer.normalize(obs_t)
             if eval_mode:
-                action = self.actor.deterministic(obs_t)
+                action_t = self.actor.deterministic(norm_obs)
             else:
-                action, _ = self.actor.sample(obs_t)
-        return action.cpu().numpy()[0]
+                action_t, _ = self.actor.sample(norm_obs)
+
+        action_np = action_t.detach().cpu().numpy()
+        # Expect shape (1, act_dim)
+        if action_np.ndim == 2 and action_np.shape[0] == 1:
+            action_np = action_np[0]
+        return action_np
 
     def update(self, replay_buffer, batch_size: int = 256):
         batch = replay_buffer.sample_batch(batch_size)
         obs = batch["obs"].to(self.device)
         acts = batch["acts"].to(self.device)
-        rews = batch["rews"].to(self.device)
-        next_obs = batch["next_obs"].to(self.device)
         done = batch["done"].to(self.device)
+        next_obs = batch["next_obs"].to(self.device)
+        rews = batch["rews"].to(self.device)
 
-        # Critic update
+        # Update normalizer from this batch (no grad)
         with torch.no_grad():
-            next_actions, next_log_probs = self.actor.sample(next_obs)
-            q1_next = self.q1_target(next_obs, next_actions)
-            q2_next = self.q2_target(next_obs, next_actions)
+            self.obs_normalizer.update(obs)
+            self.obs_normalizer.update(next_obs)
+
+        # Normalize before passing to networks
+        obs_n = self.obs_normalizer.normalize(obs)
+        next_obs_n = self.obs_normalizer.normalize(next_obs)
+
+        # Critic update (use normalized obs)
+        with torch.no_grad():
+            next_actions, next_log_probs = self.actor.sample(next_obs_n)
+            q1_next = self.q1_target(next_obs_n, next_actions)
+            q2_next = self.q2_target(next_obs_n, next_actions)
             q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_probs
             target_q = rews + (1 - done) * self.config.gamma * q_next
 
-        q1_pred = self.q1(obs, acts)
-        q2_pred = self.q2(obs, acts)
+        q1_pred = self.q1(obs_n, acts)
+        q2_pred = self.q2(obs_n, acts)
         q1_loss = F.mse_loss(q1_pred, target_q)
         q2_loss = F.mse_loss(q2_pred, target_q)
         critic_loss = q1_loss + q2_loss
@@ -171,18 +208,29 @@ class SACAgent:
         self.q1_opt.zero_grad()
         self.q2_opt.zero_grad()
         critic_loss.backward()
+
+        # gradient clipping for critics
+        if self.config.max_grad_norm is not None and self.config.max_grad_norm > 0:
+            nn_utils.clip_grad_norm_(self.q1.parameters(), self.config.max_grad_norm)
+            nn_utils.clip_grad_norm_(self.q2.parameters(), self.config.max_grad_norm)
+
         self.q1_opt.step()
         self.q2_opt.step()
 
-        # Actor update
-        pi_actions, log_pi = self.actor.sample(obs)
-        q1_pi = self.q1(obs, pi_actions)
-        q2_pi = self.q2(obs, pi_actions)
+        # Actor update (use normalized obs)
+        pi_actions, log_pi = self.actor.sample(obs_n)
+        q1_pi = self.q1(obs_n, pi_actions)
+        q2_pi = self.q2(obs_n, pi_actions)
         q_pi = torch.min(q1_pi, q2_pi)
         actor_loss = (self.alpha * log_pi - q_pi).mean()
 
         self.actor_opt.zero_grad()
         actor_loss.backward()
+
+        # gradient clipping for actor
+        if self.config.max_grad_norm is not None and self.config.max_grad_norm > 0:
+            nn_utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
+
         self.actor_opt.step()
 
         # Alpha update
@@ -193,6 +241,12 @@ class SACAgent:
             self.alpha_opt.zero_grad()
             alpha_loss.backward()
             self.alpha_opt.step()
+
+            # clamp log_alpha to keep alpha in [alpha_min, alpha_max]
+            with torch.no_grad():
+                self.log_alpha.data.clamp_(
+                    math.log(self.config.alpha_min), math.log(self.config.alpha_max)
+                )
 
         # Soft update targets
         with torch.no_grad():

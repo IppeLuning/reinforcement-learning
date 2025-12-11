@@ -56,6 +56,15 @@ class SuccessBonusWrapper(gym.Wrapper):
         return obs, reward, done, truncated, info
 
 
+class ScaleRewardWrapper(gym.RewardWrapper):
+    def __init__(self, env, scale=0.01):
+        super().__init__(env)
+        self.scale = scale
+
+    def reward(self, reward):
+        return reward * self.scale
+
+
 def make_metaworld_env(task_name, max_episode_steps, seed=None):
     # 1. Instantiate ML1 to get the benchmark and task list
     # ML1 contains the distribution of goals for this specific task
@@ -68,7 +77,8 @@ def make_metaworld_env(task_name, max_episode_steps, seed=None):
     # 3. Apply the Task Sampler Wrapper (The Fix)
     env = MetaWorldTaskSampler(env, ml1, mode="train")
 
-    env = SuccessBonusWrapper(env, bonus=10.0)
+    # env = ScaleRewardWrapper(env, scale=0.1)
+    env = SuccessBonusWrapper(env, bonus=20.0)
 
     # 4. Apply TimeLimit (Standard Gym wrapper)
     env = TimeLimit(env, max_episode_steps=max_episode_steps)

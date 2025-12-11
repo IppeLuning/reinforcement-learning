@@ -66,7 +66,6 @@ def evaluate(env, agent, episodes: int = 5):
         if len(episode_actions) > 1:
             actions_arr = np.array(episode_actions)
             diffs = np.diff(actions_arr, axis=0)
-            # L2 norm squared of differences, averaged over steps
             smoothness_score = np.mean(np.linalg.norm(diffs, axis=1) ** 2)
             action_smoothness.append(smoothness_score)
 
@@ -129,9 +128,14 @@ def run_training_loop(
             act = agent.select_action(obs, eval_mode=False)
 
         next_obs, rew, done, truncated, info = env.step(act)
+
+        # terminal is used only for episode control
         terminal = done or truncated
 
-        replay_buffer.store(obs, act, rew, next_obs, float(terminal))
+        # IMPORTANT: store only true termination (done) for bootstrapping mask
+        done_float = float(done)
+
+        replay_buffer.store(obs, act, rew, next_obs, done_float)
         obs = next_obs
         episode_return += rew
         epsiode_success = max(epsiode_success, float(info.get("success", 0.0)))
@@ -158,7 +162,6 @@ def run_training_loop(
         if t % eval_interval == 0:
             eval_metrics = evaluate(env, agent, episodes=eval_episodes)
 
-            # Unpack for readability
             mean_ret = eval_metrics["mean_return"]
             best_ret = eval_metrics["best_return"]
             mean_succ = eval_metrics["mean_success"]
@@ -202,7 +205,6 @@ def run_training_loop(
                 stop_reason = "early_stopping"
                 break
 
-    # Calculate final statistics
     total_time = time.time() - start_time
     training_stats = {
         "task": task_name,
@@ -227,19 +229,12 @@ def _get_params_for_task(cfg, task_name):
       sac_params (dict): For SACConfig
       loop_params (dict): For training loop (patience, target_success)
     """
-    # 1. Start with Single-Task Defaults
     raw_params = cfg["single_task"]["defaults"].copy()
-
-    # 2. Apply Task-Specific Overrides (if any)
     task_overrides = cfg["single_task"].get("tasks", {}).get(task_name, {})
     raw_params.update(task_overrides)
 
-    # 3. Inject Network Config (Hidden Dims)
-    # Ensure it's a tuple for the dataclass
     raw_params["hidden_dims"] = tuple(cfg["network"]["hidden_dims"])
 
-    # 4. Extract Loop-Specific Params (Not part of SACConfig)
-    # We .pop() them so they don't crash SACConfig initialization
     target_mean_success = raw_params.pop("target_mean_success", None)
     patience = raw_params.pop("patience", math.inf)
     updates_per_step = raw_params.pop("updates_per_step", 1)
@@ -248,19 +243,14 @@ def _get_params_for_task(cfg, task_name):
 
 
 def train_single_task_session(cfg, task_name, seed):
-    """
-    Trains a single-task agent using task-specific hyperparameters.
-    """
     set_seed(seed)
     device = get_device()
     algo = cfg["single_task"]["algorithm"]
 
-    # --- NEW: Dynamic Config Loading ---
     sac_params_dict, target_success, patience, updates_per_step = _get_params_for_task(
         cfg, task_name
     )
-    sac_config = SACConfig(**sac_params_dict)  # Now safe to initialize
-    # -----------------------------------
+    sac_config = SACConfig(**sac_params_dict)
 
     save_path = os.path.join(
         cfg["defaults"]["save_dir"], "single_task", task_name, f"seed_{seed}"
@@ -271,14 +261,14 @@ def train_single_task_session(cfg, task_name, seed):
         task_name, cfg["defaults"]["max_episode_steps"], seed
     )
 
-    # Initialize Agent with the specific config for this task
     agent = SACAgent(obs_dim, act_dim, low, high, device, sac_config)
-
     rb = ReplayBuffer(obs_dim, act_dim, cfg["single_task"]["replay_buffer_size"])
 
     print(f"\n--- [Single Task] {task_name} | Seed {seed} ---")
     print(
-        f"    Params: Alpha={sac_config.init_alpha}, Target Entropy Scale={sac_config.target_entropy_scale}, Patience={patience}, Target={target_success}"
+        f"    Params: Alpha={sac_config.init_alpha}, "
+        f"Target Entropy Scale={sac_config.target_entropy_scale}, "
+        f"Patience={patience}, Target={target_success}"
     )
 
     stats = run_training_loop(
@@ -292,16 +282,14 @@ def train_single_task_session(cfg, task_name, seed):
         save_path,
         seed,
         task_name,
-        target_success,  # Passed dynamically
-        patience,  # Passed dynamically
+        target_success,
+        patience,
         algo,
         updates_per_step,
         is_multitask=False,
     )
 
-    # Save Results
     json_path = os.path.join(save_path, "results.json")
-    # Log the specific params used for this run, not the generic ones
     full_log = {"config": cfg, "final_sac_params": sac_params_dict, "results": stats}
     with open(json_path, "w") as f:
         json.dump(full_log, f, indent=4)
@@ -311,26 +299,18 @@ def train_single_task_session(cfg, task_name, seed):
 
 
 def train_multitask_session(cfg, seed):
-    """
-    Trains the multi-task agent using the multi-task specific config.
-    """
     set_seed(seed)
     device = get_device()
     algo = cfg["multi_task"]["algorithm"]
     task_name_for_log = "MT_shared"
 
-    # --- NEW: Multi-Task Config Extraction ---
     raw_params = cfg["multi_task"]["sac_params"].copy()
-
-    # Inject Network Config
     raw_params["hidden_dims"] = tuple(cfg["network"]["hidden_dims"])
 
-    # Extract Loop Params
     target_success = raw_params.pop("target_mean_success", None)
     patience = raw_params.pop("patience", math.inf)
 
     sac_config = SACConfig(**raw_params)
-    # -----------------------------------------
 
     save_path = os.path.join(cfg["defaults"]["save_dir"], "multitask", f"seed_{seed}")
     os.makedirs(save_path, exist_ok=True)
@@ -351,14 +331,15 @@ def train_multitask_session(cfg, seed):
     )
 
     agent = MTSACAgent(obs_dim, act_dim, len(tasks), low, high, device, sac_config)
-
     rb = ReplayBuffer(
         obs_dim + len(tasks), act_dim, cfg["multi_task"]["replay_buffer_size"]
     )
 
     print(f"\n--- [Multi-Task] {tasks} | Seed {seed} ---")
     print(
-        f"    Params: Alpha={sac_config.init_alpha}, Target Entropy Scale={sac_config.target_entropy_scale}, Patience={patience}, Target={target_success}"
+        f"    Params: Alpha={sac_config.init_alpha}, "
+        f"Target Entropy Scale={sac_config.target_entropy_scale}, "
+        f"Patience={patience}, Target={target_success}"
     )
 
     stats = run_training_loop(
@@ -378,7 +359,6 @@ def train_multitask_session(cfg, seed):
         is_multitask=True,
     )
 
-    # Save Results
     json_path = os.path.join(save_path, "results.json")
     full_log = {"config": cfg, "final_sac_params": raw_params, "results": stats}
     with open(json_path, "w") as f:

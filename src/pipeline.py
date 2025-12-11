@@ -30,12 +30,8 @@ class Pipeline:
 
         for task in tasks:
             for seed in seeds:
-                try:
-                    train_single_task_session(
-                        cfg=self.config, task_name=task, seed=seed
-                    )
-                except Exception as e:
-                    print(f"Error training single task {task} with seed {seed}: {e}")
+
+                train_single_task_session(cfg=self.config, task_name=task, seed=seed)
 
     def _train_multi_task_mode(self):
         """Trains the multi-task agent across all configured seeds."""
@@ -49,10 +45,7 @@ class Pipeline:
         seeds = self.multi_task_cfg["seeds"]
 
         for seed in seeds:
-            try:
-                train_multitask_session(cfg=self.config, seed=seed)
-            except Exception as e:
-                print(f"Error training multi-task agent with seed {seed}: {e}")
+            train_multitask_session(cfg=self.config, seed=seed)
 
     def execute(self):
         """
