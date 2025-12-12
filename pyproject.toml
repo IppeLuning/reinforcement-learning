@@ -12,4 +12,18 @@ dependencies = [
     "packaging>=25.0",
     "pyaml>=25.7.0",
     "torch>=2.9.1",
+
+    # JAX (CPU by default unless an accelerator backend is installed)
+    "jax==0.5.0",
+
+    # Apple Metal backend (macOS only)
+    "jaxlib==0.5.0; platform_system == 'Darwin'",
+    "jax-metal==0.1.1; platform_system == 'Darwin'",
 ]
+
+[project.optional-dependencies]
+# Hábrók: standardize on CUDA 12 (>= 12.1 is common there)
+cuda = ["jax[cuda12]==0.5.0; platform_system == 'Linux'"]
+
+# Optional: if you prefer using the cluster's CUDA modules instead of pip CUDA wheels
+cuda-local = ["jax[cuda12-local]==0.5.0; platform_system == 'Linux'"]
