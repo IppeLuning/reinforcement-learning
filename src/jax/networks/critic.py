@@ -1,5 +1,8 @@
 """Q-Network (Critic) implementations for Soft Actor-Critic.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module provides the value function approximators used in SAC:
 - QNetwork: Single Q-function that maps (state, action) -> Q-value
 - TwinQNetwork: Two independent Q-networks for double Q-learning

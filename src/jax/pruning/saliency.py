@@ -1,5 +1,8 @@
 """Saliency-based pruning for neural networks.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module implements saliency-based pruning methods like SNIP (Single-shot
 Network Pruning based on Connection Sensitivity). Saliency scores measure
 how important each parameter is by considering both its magnitude and gradient.
@@ -172,32 +175,60 @@ def compute_saliency_for_sac(
 ) -> Tuple[Params, Params]:
     """Compute saliency scores for SAC actor and critic.
     
-    Uses the combined actor-critic loss for saliency computation,
-    which captures the importance of parameters for the full RL objective.
+    This function computes saliency scores that measure how important each
+    parameter is to the SAC objective. The approach uses proxy loss functions
+    that capture the key gradients without requiring the full SAC training loop.
+    
+    **Actor Saliency:**
+    We use a proxy loss based on the log-probability of the sampled actions.
+    This captures how sensitive the policy distribution is to each parameter,
+    which is relevant because the actor loss in SAC is based on the entropy-
+    regularized policy gradient: L_actor = E[alpha * log_pi(a|s) - Q(s,a)]
+    
+    **Critic Saliency:**
+    We use the squared Q-values as a proxy. This captures the magnitude of
+    gradients flowing through the network, which correlates with parameter
+    importance for the MSE-based critic loss: L_critic = E[(Q - y)^2]
+    
+    Note: These are proxy losses, not the exact SAC objectives. For precise
+    saliency computation, one would need to use the full TD-error and policy
+    gradient. However, proxy losses work well in practice for pruning purposes
+    as they capture the relative importance of parameters.
+    
+    Reference: Lee et al. "SNIP: Single-shot Network Pruning based on 
+    Connection Sensitivity" (ICLR 2019)
     
     Args:
         actor_params: Actor network parameters.
         critic_params: Critic network parameters.
-        actor_apply_fn: Actor forward function.
-        critic_apply_fn: Critic forward function.
-        batch: Batch of transitions.
-        alpha: Temperature parameter.
+        actor_apply_fn: Actor forward function (returns mean, log_std).
+        critic_apply_fn: Critic forward function (returns q1, q2).
+        batch: Batch of transitions with obs, actions, rewards, next_obs, dones.
+        alpha: Temperature parameter (currently unused in proxy, kept for API).
         
     Returns:
-        Tuple of (actor_saliency, critic_saliency).
+        Tuple of (actor_saliency, critic_saliency) with same structure as params.
     """
-    # Actor loss function
+    # Actor saliency: use log-probability as proxy for policy gradient sensitivity
     def actor_loss_fn(params, batch):
         mean, log_std = actor_apply_fn(params, batch.obs)
-        # Simplified: just use mean for saliency
-        return jnp.mean(mean ** 2)
+        std = jnp.exp(log_std)
+        # Log-prob of the actions in the batch (Gaussian)
+        # This captures sensitivity of policy distribution to parameters
+        log_prob = -0.5 * jnp.sum(
+            ((batch.actions - jnp.tanh(mean)) / (std + 1e-6)) ** 2 + 
+            2 * log_std + jnp.log(2 * jnp.pi),
+            axis=-1
+        )
+        return -jnp.mean(log_prob)  # Negate to get loss-like behavior
     
-    # Critic loss function  
+    # Critic saliency: squared Q-values as proxy for TD gradient magnitude
     def critic_loss_fn(params, batch):
         q1, q2 = critic_apply_fn(params, batch.obs, batch.actions)
+        # Sum of squared Q-values captures gradient flow through network
         return jnp.mean(q1 ** 2) + jnp.mean(q2 ** 2)
     
-    # Compute saliencies
+    # Compute saliencies using |weight * gradient|
     actor_saliency = compute_saliency(actor_params, actor_loss_fn, batch)
     critic_saliency = compute_saliency(critic_params, critic_loss_fn, batch)
     

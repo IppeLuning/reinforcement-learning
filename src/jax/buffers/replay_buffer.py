@@ -1,5 +1,8 @@
 """Replay buffer for experience storage and sampling.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module provides a simple but efficient replay buffer that stores
 transitions in NumPy arrays and returns JAX arrays for training.
 """

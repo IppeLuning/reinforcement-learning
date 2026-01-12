@@ -1,5 +1,8 @@
 """Multi-Layer Perceptron (MLP) module implemented in Flax.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module provides a flexible MLP building block used by actor and critic networks.
 """
 

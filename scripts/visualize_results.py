@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Visualization scripts for LTH Multi-Task RL results.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 Generates publication-quality figures for:
 1. Learning curves (return/success vs steps)
 2. Mask structural analysis (Jaccard heatmaps)

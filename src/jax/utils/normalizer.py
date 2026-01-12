@@ -1,5 +1,8 @@
 """Running mean/variance normalizer for observations.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module provides online normalization of observations using Welford's
 algorithm for numerically stable running statistics.
 """

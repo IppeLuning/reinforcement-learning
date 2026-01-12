@@ -1,5 +1,8 @@
 """JAX-based Reinforcement Learning components for Lottery Ticket Hypothesis research.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This package provides a complete JAX/Flax implementation of SAC (Soft Actor-Critic)
 for both single-task and multi-task reinforcement learning, with support for
 pruning and structural analysis of sparse subnetworks.

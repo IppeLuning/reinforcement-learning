@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Main entry point for JAX-based LTH training pipeline.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 Usage:
     # Train push-v3 with seed 0 (single task for testing)
     python main_jax.py --task push-v3 --seed 0

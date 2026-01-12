@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Lottery Ticket Hypothesis Pipeline for Multi-Task RL.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This script implements the full LTH research pipeline:
 1. Train single-task SAC agents (push-v3 for now)
 2. Prune each to 80% sparsity using saliency-based pruning

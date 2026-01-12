@@ -1,5 +1,8 @@
 """Evaluation utilities for RL agents.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module provides functions for evaluating trained agents,
 computing metrics, and tracking performance over time.
 """

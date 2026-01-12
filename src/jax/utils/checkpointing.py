@@ -1,5 +1,8 @@
 """Simple checkpointing for training state and masks using pickle/numpy.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 Orbax has compatibility issues with jax-metal, so we use a simpler approach.
 """
 

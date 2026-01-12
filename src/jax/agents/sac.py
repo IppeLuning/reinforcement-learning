@@ -1,5 +1,8 @@
 """Soft Actor-Critic (SAC) agent implementation in JAX.
 
+DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
+and reviewed by Marinus van den Ende.
+
 This module provides a complete SAC implementation with:
 - JIT-compiled training step for maximum performance
 - Learnable temperature (alpha) with automatic entropy tuning
