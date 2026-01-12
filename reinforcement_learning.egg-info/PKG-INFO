@@ -1,0 +1,28 @@
+Metadata-Version: 2.4
+Name: reinforcement-learning
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown
+Requires-Dist: gymnasium>=1.2.2
+Requires-Dist: metaworld>=3.0.0
+Requires-Dist: moviepy>=2.2.1
+Requires-Dist: numpy>=2.3.5
+Requires-Dist: packaging>=25.0
+Requires-Dist: pyaml>=25.7.0
+Requires-Dist: torch>=2.9.1
+Requires-Dist: jax==0.5.0
+Requires-Dist: flax>=0.10.0
+Requires-Dist: optax>=0.2.4
+Requires-Dist: orbax-checkpoint>=0.9.0
+Requires-Dist: jaxlib==0.5.0; platform_system == "Darwin"
+Requires-Dist: jax-metal==0.1.1; platform_system == "Darwin"
+Requires-Dist: pytest>=9.0.2
+Requires-Dist: matplotlib>=3.8.0
+Requires-Dist: seaborn>=0.13.0
+Provides-Extra: cuda
+Requires-Dist: jax[cuda12]==0.5.0; platform_system == "Linux" and extra == "cuda"
+Provides-Extra: cuda-local
+Requires-Dist: jax[cuda12-local]==0.5.0; platform_system == "Linux" and extra == "cuda-local"
+
+# reinforcement-learning

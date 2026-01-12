@@ -21,7 +21,16 @@ dependencies = [
     "jaxlib==0.5.0; platform_system == 'Darwin'",
     "jax-metal==0.1.1; platform_system == 'Darwin'",
     "pytest>=9.0.2",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [project.optional-dependencies]
 # Hábrók: standardize on CUDA 12 (>= 12.1 is common there)
