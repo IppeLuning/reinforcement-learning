@@ -309,11 +309,20 @@ def main():
                         help="Output directory for results")
     parser.add_argument("--skip-training", action="store_true",
                         help="Skip training, load existing checkpoints")
+    parser.add_argument("--test", action="store_true",
+                        help="Quick test run (1000 steps)")
     args = parser.parse_args()
     
     # Load config
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
+    
+    # Override for test mode
+    if args.test:
+        config["single_task"]["total_steps"] = 1000
+        config["single_task"]["start_steps"] = 100
+        config["single_task"]["eval_interval"] = 500
+        print("\n*** TEST MODE: 1000 steps ***\n")
     
     # Determine tasks
     if args.task:

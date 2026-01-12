@@ -4,3 +4,4 @@ videos/
 checkpoints/
 .DS_Store
 uv.lock
+results_test/

@@ -1,34 +1,39 @@
-"""Orbax-based checkpointing for training state and masks.
+"""Simple checkpointing for training state and masks using pickle/numpy.
 
-This module provides utilities for saving and restoring training state,
-including support for mask checkpointing needed for Lottery Ticket experiments.
+Orbax has compatibility issues with jax-metal, so we use a simpler approach.
 """
 
 from __future__ import annotations
 
 import os
+import pickle
 from typing import Any, Dict, Optional
 
 import jax
-import orbax.checkpoint as ocp
+import jax.numpy as jnp
+import numpy as np
 from flax.core import FrozenDict
 
 from src.jax.training.train_state import SACTrainState, MaskedTrainState
 
 
+def _params_to_numpy(params: Any) -> Any:
+    """Convert JAX arrays in params tree to numpy for serialization."""
+    return jax.tree.map(lambda x: np.array(x) if hasattr(x, 'shape') else x, params)
+
+
+def _numpy_to_params(params: Any) -> Any:
+    """Convert numpy arrays back to JAX arrays."""
+    return jax.tree.map(lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x, params)
+
+
 class Checkpointer:
-    """Checkpointer for SAC training state using Orbax.
+    """Simple checkpointer for SAC training state.
     
-    Handles saving and loading of:
-    - Network parameters (actor, critic, target)
-    - Optimizer states
-    - Learnable alpha
-    - Binary masks (for Lottery Ticket experiments)
-    - Training metadata (step, config, etc.)
+    Uses pickle for simplicity and compatibility.
     
     Attributes:
         checkpoint_dir: Directory for saving checkpoints.
-        checkpointer: Orbax PyTreeCheckpointer instance.
         
     Example:
         >>> ckpt = Checkpointer("checkpoints/sac_run1")
@@ -43,21 +48,13 @@ class Checkpointer:
             checkpoint_dir: Directory to store checkpoints.
         """
         self.checkpoint_dir = checkpoint_dir
-        self.checkpointer = ocp.PyTreeCheckpointer()
         os.makedirs(checkpoint_dir, exist_ok=True)
     
     def _get_checkpoint_path(self, step: Optional[int] = None) -> str:
-        """Get path for a specific checkpoint.
-        
-        Args:
-            step: Training step number. If None, uses 'latest'.
-            
-        Returns:
-            Full path to the checkpoint directory.
-        """
+        """Get path for a specific checkpoint."""
         if step is None:
-            return os.path.join(self.checkpoint_dir, "latest")
-        return os.path.join(self.checkpoint_dir, f"step_{step}")
+            return os.path.join(self.checkpoint_dir, "latest.pkl")
+        return os.path.join(self.checkpoint_dir, f"step_{step}.pkl")
     
     def save(
         self,
@@ -75,30 +72,32 @@ class Checkpointer:
         Returns:
             Path where checkpoint was saved.
         """
-        # Extract saveable state (parameters and arrays only)
+        # Extract saveable state (convert to numpy)
         checkpoint_data = {
-            "step": state.step,
-            "actor_params": state.actor_params,
-            "critic_params": state.critic_params,
-            "target_critic_params": state.target_critic_params,
-            "log_alpha": state.log_alpha,
+            "step": int(state.step),
+            "actor_params": _params_to_numpy(state.actor_params),
+            "critic_params": _params_to_numpy(state.critic_params),
+            "target_critic_params": _params_to_numpy(state.target_critic_params),
+            "log_alpha": np.array(state.log_alpha),
         }
         
         # Add masks if present
         if isinstance(state, MaskedTrainState):
-            checkpoint_data["actor_mask"] = state.actor_mask
-            checkpoint_data["critic_mask"] = state.critic_mask
+            checkpoint_data["actor_mask"] = _params_to_numpy(state.actor_mask)
+            checkpoint_data["critic_mask"] = _params_to_numpy(state.critic_mask)
         
         # Add extra data
         if extra is not None:
             checkpoint_data["extra"] = extra
         
         path = self._get_checkpoint_path(step)
-        self.checkpointer.save(path, checkpoint_data)
+        with open(path, "wb") as f:
+            pickle.dump(checkpoint_data, f)
         
         # Also save as 'latest' for easy restoration
         latest_path = self._get_checkpoint_path(None)
-        self.checkpointer.save(latest_path, checkpoint_data)
+        with open(latest_path, "wb") as f:
+            pickle.dump(checkpoint_data, f)
         
         return path
     
@@ -118,39 +117,24 @@ class Checkpointer:
         """
         path = self._get_checkpoint_path(step)
         
-        # Create template for restoration
-        template = {
-            "step": template_state.step,
-            "actor_params": template_state.actor_params,
-            "critic_params": template_state.critic_params,
-            "target_critic_params": template_state.target_critic_params,
-            "log_alpha": template_state.log_alpha,
-        }
+        with open(path, "rb") as f:
+            checkpoint_data = pickle.load(f)
         
-        if isinstance(template_state, MaskedTrainState):
-            template["actor_mask"] = template_state.actor_mask
-            template["critic_mask"] = template_state.critic_mask
-            template["extra"] = {}
-        else:
-            template["extra"] = {}
-        
-        checkpoint_data = self.checkpointer.restore(path, item=template)
-        
-        # Reconstruct state with restored parameters
+        # Reconstruct state with restored parameters (convert back to JAX)
         restored_state = template_state.replace(
             step=checkpoint_data["step"],
-            actor_params=checkpoint_data["actor_params"],
-            critic_params=checkpoint_data["critic_params"],
-            target_critic_params=checkpoint_data["target_critic_params"],
-            log_alpha=checkpoint_data["log_alpha"],
+            actor_params=_numpy_to_params(checkpoint_data["actor_params"]),
+            critic_params=_numpy_to_params(checkpoint_data["critic_params"]),
+            target_critic_params=_numpy_to_params(checkpoint_data["target_critic_params"]),
+            log_alpha=jnp.array(checkpoint_data["log_alpha"]),
         )
         
         # Restore masks if applicable
         if isinstance(template_state, MaskedTrainState):
             if "actor_mask" in checkpoint_data:
                 restored_state = restored_state.replace(
-                    actor_mask=checkpoint_data.get("actor_mask"),
-                    critic_mask=checkpoint_data.get("critic_mask"),
+                    actor_mask=_numpy_to_params(checkpoint_data.get("actor_mask")),
+                    critic_mask=_numpy_to_params(checkpoint_data.get("critic_mask")),
                 )
         
         return restored_state
@@ -172,36 +156,37 @@ class Checkpointer:
             Path where masks were saved.
         """
         mask_data = {
-            "actor_mask": actor_mask,
-            "critic_mask": critic_mask,
+            "actor_mask": _params_to_numpy(actor_mask),
+            "critic_mask": _params_to_numpy(critic_mask),
         }
         
-        path = os.path.join(self.checkpoint_dir, f"masks_{name}")
-        self.checkpointer.save(path, mask_data)
+        path = os.path.join(self.checkpoint_dir, f"masks_{name}.pkl")
+        with open(path, "wb") as f:
+            pickle.dump(mask_data, f)
         return path
     
     def load_masks(
         self,
         name: str,
-        template_actor_mask: FrozenDict,
-        template_critic_mask: FrozenDict,
+        template_actor_mask: FrozenDict = None,
+        template_critic_mask: FrozenDict = None,
     ) -> tuple[FrozenDict, FrozenDict]:
         """Load masks from checkpoint.
         
         Args:
             name: Name of the mask set to load.
-            template_actor_mask: Template for actor mask structure.
-            template_critic_mask: Template for critic mask structure.
+            template_actor_mask: Unused, for API compatibility.
+            template_critic_mask: Unused, for API compatibility.
             
         Returns:
             Tuple of (actor_mask, critic_mask).
         """
-        path = os.path.join(self.checkpoint_dir, f"masks_{name}")
+        path = os.path.join(self.checkpoint_dir, f"masks_{name}.pkl")
         
-        template = {
-            "actor_mask": template_actor_mask,
-            "critic_mask": template_critic_mask,
-        }
+        with open(path, "rb") as f:
+            mask_data = pickle.load(f)
         
-        mask_data = self.checkpointer.restore(path, item=template)
-        return mask_data["actor_mask"], mask_data["critic_mask"]
+        return (
+            _numpy_to_params(mask_data["actor_mask"]),
+            _numpy_to_params(mask_data["critic_mask"]),
+        )
