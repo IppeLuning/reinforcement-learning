@@ -1,75 +1,44 @@
-defaults:
-  max_episode_steps: 200
-  save_dir: "checkpoints"
-
 environments:
   tasks: 
-    # - "reach-v3"
-    - "push-v3" 
+    - "reach-v3"
+    # - "push-v3" 
     # - "pick-place-v3"
+  seeds: [420] # 5 seeds
+  
 
-network:
-  hidden_dims: [400, 400, 400]
-
-# --- SINGLE TASK CONFIGURATION ---
-single_task:
-  enabled: true
-  algorithm: "sac"
-  total_steps: 2000000
+hyperparameters:
+  total_steps: 150000
   start_steps: 10000
+  max_episode_steps: 400
   batch_size: 256
-  seeds: [0, 1, 2, 3, 4]
   eval_interval: 10000
   replay_buffer_size: 1000000
+  hidden_dims: [256, 256, 256]
   
   # Default Hyperparameters (Base SAC)
   defaults:
     gamma: 0.99
     tau: 0.005
-    actor_lr: 0.0001
-    critic_lr: 0.0001
-    alpha_lr: 0.00005
-    target_entropy_scale: 0.025
-    auto_alpha: true
-    init_alpha: 0.1           # Default: High exploration
-    target_mean_success: 0.8 # Default: Good enough
-    patience: 3             # Default: Standard patience
+    actor_lr: 0.0003
+    critic_lr: 0.0003
+    alpha_lr: 0.0003
+    init_alpha: 0.2  
+
+    target_mean_success: 0.8 
+    patience: 3            
 
   # Per-Task Overrides 
   tasks:
     reach-v3:
-      init_alpha: 0.1
-      target_entropy_scale: 0.25
-      updates_per_step: 1
-      
+      init_alpha: 0.2
+
     push-v3:
       init_alpha: 1.0
       target_entropy_scale: 1.0
       
     pick-place-v3:
-      init_alpha: 1.0         # High exploration needed
-      target_mean_success: 0.85 # Hard task, 85% is great
+      init_alpha: 1.0
+      target_mean_success: 0.8
 
-# --- MULTI TASK CONFIGURATION ---
-multi_task:
-  enabled: true
-  algorithm: "mtsac"
-  total_steps: 5000000
-  start_steps: 20000
-  batch_size: 512
-  seeds: [0]
-  eval_interval: 25000
-  replay_buffer_size: 2000000
-  
-  # Multi-task usually uses the "Hard" settings (High Exploration)
-  sac_params:
-    gamma: 0.99
-    tau: 0.005
-    actor_lr: 0.0003
-    critic_lr: 0.0003
-    alpha_lr: 0.0003
-    target_entropy_scale: 1.0
-    auto_alpha: true
-    init_alpha: 1.0 
-    target_mean_success: 0.90
-    patience: 20
+pruning:
+  sparsity: 0.8
