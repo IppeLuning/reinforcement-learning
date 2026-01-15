@@ -82,7 +82,6 @@ def evaluate(env, agent, episodes: int = 5):
     return metrics
 
 
-# --- Core Training Loop ---
 def run_training_loop(
     env,
     agent,
@@ -187,7 +186,15 @@ def run_training_loop(
                     save_dir,
                     f"{algo.lower()}_{task_name}_seed{seed}_best_actor.pt",
                 )
-                torch.save(agent.actor.state_dict(), actor_path)
+                torch.save(
+                    {
+                        "actor": agent.actor.state_dict(),
+                        "normalizer_mean": agent.obs_normalizer.mean,
+                        "normalizer_var": agent.obs_normalizer.var,
+                        "normalizer_count": agent.obs_normalizer.count,
+                    },
+                    actor_path,
+                )
                 print(f"Saved new best actor (Return: {best_return_overall:.2f})")
             else:
                 no_improve += 1

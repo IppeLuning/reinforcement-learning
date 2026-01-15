@@ -47,7 +47,8 @@ single_task:
       target_entropy_scale: 1.0
       
     pick-place-v3:
-      init_alpha: 1.0         # High exploration needed
+      init_alpha: 1.0
+      target_entropy_scale: 1.0
       target_mean_success: 0.85 # Hard task, 85% is great
 
 # --- MULTI TASK CONFIGURATION ---
