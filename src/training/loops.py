@@ -286,6 +286,19 @@ def run_training_loop_vectorized(
     eval_env, _, _, _, _ = make_metaworld_env(task_name, max_episode_steps, seed + 99999)
 
     # --- Init ---
+    print(f"\n{'='*80}")
+    print(f"VECTORIZED TRAINING: {task_name} (seed {seed})")
+    print(f"{'='*80}")
+    print(f"Parallel Environments: {env.num_envs}")
+    print(f"Total Steps: {total_env_steps:,}")
+    print(f"Random Exploration Steps: {start_steps:,}")
+    print(f"Batch Size: {batch_size}")
+    print(f"Updates per Step: {updates_per_step}")
+    print(f"Eval Interval: {eval_interval:,}")
+    if target_mean_success:
+        print(f"Target Success Rate: {target_mean_success} (patience: {patience})")
+    print(f"{'='*80}\n")
+    
     obs, _ = env.reset(seed=seed)
     num_envs = env.num_envs
 
@@ -301,16 +314,21 @@ def run_training_loop_vectorized(
     train_metrics_buffer = defaultdict(list)
     metrics_history = []
 
+    # Rolling window for console print
+    recent_successes = []
+    recent_returns = []
+
     env_steps = 0
 
     while env_steps < total_env_steps:
         # 1. Action selection
         if env_steps < start_steps:
-            actions = np.stack([
+            actions = np.array([
                 env.single_action_space.sample()
                 for _ in range(num_envs)
             ])
         else:
+            # agent.select_action handles batched observations correctly
             actions = agent.select_action(obs, eval_mode=False)
 
         # 2. Step environments
@@ -318,17 +336,12 @@ def run_training_loop_vectorized(
         dones = np.logical_or(terminated, truncated)
         
         # Extract success info from each environment
-        # In AsyncVectorEnv, infos is a dict where each key maps to arrays/lists
-        success_values = []
+        # AsyncVectorEnv returns infos as a dict with arrays
         if isinstance(infos, dict) and "success" in infos:
-            # Success is already an array
-            success_values = infos["success"]
-        elif isinstance(infos, (tuple, list)):
-            # Tuple/list of info dicts (one per env)
-            success_values = [info.get("success", 0.0) for info in infos]
+            success_values = np.asarray(infos["success"])
         else:
-            # Fallback - no success info available
-            success_values = [0.0] * num_envs
+            # Fallback if success is not available
+            success_values = np.zeros(num_envs)
 
         # 3. Store transitions
         for i in range(num_envs):
@@ -350,6 +363,30 @@ def run_training_loop_vectorized(
             episode_len[i] += 1
 
             if dones[i]:
+                # A. Console Logging
+                recent_successes.append(episode_success[i])
+                recent_returns.append(episode_return[i])
+                if len(recent_successes) > 100:
+                    recent_successes.pop(0)
+                    recent_returns.pop(0)
+
+                color = Color.GREEN if episode_success[i] >= 1.0 else Color.RED
+                success_emoji = "✓" if episode_success[i] >= 1.0 else "✗"
+                
+                # Print every episode completion
+                avg_success = np.mean(recent_successes[-100:]) if recent_successes else 0.0
+                avg_return = np.mean(recent_returns[-100:]) if recent_returns else 0.0
+                
+                print(
+                    f"[Env {i}] Step {env_steps:>7} | "
+                    f"Ret: {episode_return[i]:>6.1f} | "
+                    f"{color}{success_emoji} Succ: {episode_success[i]:.0f}{Color.END} | "
+                    f"Len: {episode_len[i]:.0f} | "
+                    f"Avg(100): Ret={avg_return:>5.1f} Succ={avg_success:.2f} | "
+                    f"Time: {(time.time() - start_time)/60:.1f}m"
+                )
+
+                # B. Disk Logging
                 append_to_jsonl(episodes_path, {
                     "step": env_steps,
                     "episode_return": episode_return[i],
@@ -366,8 +403,26 @@ def run_training_loop_vectorized(
         obs = next_obs
         env_steps += num_envs
 
+        # Progress update every 1000 steps
+        if env_steps % 1000 == 0:
+            progress_pct = (env_steps / total_env_steps) * 100
+            buffer_size = replay_buffer.size
+            avg_success = np.mean(recent_successes[-100:]) if len(recent_successes) >= 10 else 0.0
+            print(
+                f"{Color.BLUE}[Progress] Step {env_steps:>7}/{total_env_steps} ({progress_pct:>5.1f}%) | "
+                f"Buffer: {buffer_size:>7,} | "
+                f"Success(100): {avg_success:.2f} | "
+                f"Elapsed: {(time.time() - start_time)/60:.1f}m{Color.END}"
+            )
+
         # 5. Training updates
+        # Scale updates by num_envs to maintain same gradient-to-data ratio as single env
+        # With 4 envs, we collect 4x more data per step cycle, so we need 4x more gradient updates
         if env_steps >= start_steps and replay_buffer.is_ready(batch_size):
+            # Print when training starts
+            if env_steps == start_steps + num_envs:
+                print(f"\n{Color.YELLOW}>>> Starting Training Phase (Random Exploration Complete){Color.END}\n")
+            
             for _ in range(updates_per_step * num_envs):
                 metrics = agent.update(replay_buffer, batch_size)
                 for k, v in metrics.items():
@@ -405,27 +460,55 @@ def run_training_loop_vectorized(
 
             mean_ret = eval_metrics["mean_return"]
             mean_succ = eval_metrics["mean_success"]
+            std_ret = eval_metrics.get("std_return", 0.0)
 
+            critic_loss = avg_train_metrics.get('train/critic_loss', 0.0)
+            actor_loss = avg_train_metrics.get('train/actor_loss', 0.0)
+            
+            print(f"\n{'-'*80}")
             print(
-                f"[Eval] Step {env_steps:>7} | "
-                f"Ret {mean_ret:>6.1f} | "
-                f"Succ {mean_succ:>4.2f} | "
-                f"Alpha {agent.alpha:.3f}"
+                f"{Color.YELLOW}[EVAL]{Color.END} Step {env_steps:>7} | "
+                f"Return: {mean_ret:>6.1f}±{std_ret:>5.1f} | "
+                f"Success: {mean_succ:>4.2f} | "
+                f"Alpha: {agent.alpha:.3f}\n"
+                f"       Train Losses - Critic: {critic_loss:.3f} | Actor: {actor_loss:.3f}"
             )
+            print(f"{'-'*80}\n")
 
             if mean_ret > best_return:
                 best_return = mean_ret
                 best_success = mean_succ
-                success_streak = 0
                 checkpointer.save(agent.state, "checkpoint_best")
-            else:
-                success_streak += 1
+                print(f"  {Color.BLUE}>> New Best Model Saved{Color.END}")
 
-            if target_mean_success and success_streak >= patience:
-                stop_reason = "early_stopping"
-                break
+            # Early stopping based on success rate
+            if target_mean_success is not None:
+                if mean_succ >= target_mean_success:
+                    success_streak += 1
+                else:
+                    success_streak = 0
+
+                if success_streak >= patience:
+                    print(f"{Color.GREEN}>> Early stopping triggered!{Color.END}")
+                    stop_reason = "early_stopping"
+                    break
 
     checkpointer.save(agent.state, "checkpoint_final")
+    
+    # Print final summary
+    total_time = time.time() - start_time
+    print(f"\n{'='*80}")
+    print(f"{Color.GREEN}TRAINING COMPLETE{Color.END}")
+    print(f"{'='*80}")
+    print(f"Task: {task_name}")
+    print(f"Seed: {seed}")
+    print(f"Total Steps: {env_steps:,}")
+    print(f"Stop Reason: {stop_reason}")
+    print(f"Best Return: {best_return:.2f}")
+    print(f"Best Success: {best_success:.2f}")
+    print(f"Total Time: {total_time/60:.1f} minutes ({total_time/3600:.2f} hours)")
+    print(f"Steps/sec: {env_steps/total_time:.1f}")
+    print(f"{'='*80}\n")
     
     # Clean up eval environment
     eval_env.close()
