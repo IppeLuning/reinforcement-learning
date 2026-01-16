@@ -1,1 +1,1 @@
-from .factory import make_metaworld_env
+from .factory import make_metaworld_env, make_metaworld_env_vectorized

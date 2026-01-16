@@ -156,37 +156,55 @@ class SACAgent:
         obs: np.ndarray,
         eval_mode: bool = False,
     ) -> np.ndarray:
-        """Select action given observation.
-
-        Args:
-            obs: Observation array of shape (obs_dim,).
-            eval_mode: If True, use deterministic policy (no sampling).
-
-        Returns:
-            Action array of shape (act_dim,).
         """
-        # Convert to JAX array and add batch dimension
-        obs_jax = jnp.asarray(obs, dtype=jnp.float32)[None, :]
+        Select action(s) given observation(s).
 
-        # Normalize observation
+        Supports:
+        - obs.shape == (obs_dim,)
+        - obs.shape == (batch_size, obs_dim)
+        """
+        # Convert to JAX array
+        obs_jax = jnp.asarray(obs, dtype=jnp.float32)
+
+        # Ensure batch dimension
+        single = False
+        if obs_jax.ndim == 1:
+            obs_jax = obs_jax[None, :]
+            single = True
+
+        batch_size = obs_jax.shape[0]
+
+        # Normalize observations (must support batch)
         obs_norm = self.normalizer.normalize(obs_jax)
 
-        # Get policy distribution
-        mean, log_std = self.state.actor_apply_fn(self.state.actor_params, obs_norm)
+        # Policy forward pass (batched)
+        mean, log_std = self.state.actor_apply_fn(
+            self.state.actor_params,
+            obs_norm,
+        )
 
         if eval_mode:
-            # Deterministic action (evaluation)
+            # Deterministic actions (batched)
             action = deterministic_action(mean)
         else:
-            # Stochastic action (exploration)
-            self.key, action_key = jax.random.split(self.key)
-            action, _ = sample_action(mean, log_std, action_key)
+            # Split PRNG key into batch_size keys
+            self.key, subkey = jax.random.split(self.key)
+            keys = jax.random.split(subkey, batch_size)
 
-        # Scale to action bounds
-        action = scale_action(action, self.action_bounds.low, self.action_bounds.high)
+            # Sample actions (batched)
+            action, _ = sample_action(mean, log_std, keys)
 
-        # Remove batch dimension and convert to numpy
-        return np.asarray(action[0])
+        # Scale to environment action bounds (batched)
+        action = scale_action(
+            action,
+            self.action_bounds.low,
+            self.action_bounds.high,
+        )
+
+        action_np = np.asarray(action)
+
+        # Remove batch dim if single input
+        return action_np[0] if single else action_np
 
     def update(
         self,
@@ -328,7 +346,10 @@ def _sac_train_step(
         next_mean, next_log_std = state.actor_apply_fn(
             state.actor_params, batch.next_obs
         )
-        next_action, next_log_prob = sample_action(next_mean, next_log_std, target_key)
+        # Split key for batch of actions
+        batch_size = batch.obs.shape[0]
+        target_keys = jax.random.split(target_key, batch_size)
+        next_action, next_log_prob = sample_action(next_mean, next_log_std, target_keys)
 
         target_q1, target_q2 = state.critic_apply_fn(
             state.target_critic_params, batch.next_obs, next_action
@@ -362,7 +383,10 @@ def _sac_train_step(
     def actor_loss_fn(actor_params: Params) -> Tuple[jax.Array, Metrics]:
         """Compute actor loss (maximize Q - alpha * entropy)."""
         mean, log_std = state.actor_apply_fn(actor_params, batch.obs)
-        action, log_prob = sample_action(mean, log_std, actor_key)
+        # Split key for batch of actions
+        batch_size = batch.obs.shape[0]
+        actor_keys = jax.random.split(actor_key, batch_size)
+        action, log_prob = sample_action(mean, log_std, actor_keys)
 
         q1, q2 = state.critic_apply_fn(state.critic_params, batch.obs, action)
         q_min = jnp.minimum(q1, q2)

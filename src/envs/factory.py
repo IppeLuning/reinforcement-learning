@@ -148,3 +148,37 @@ def make_metaworld_env(task_name, max_episode_steps, seed=0):
     act_high = env.action_space.high
 
     return env, obs_dim, act_dim, act_low, act_high
+
+
+def make_metaworld_env_vectorized(task_name, max_episode_steps, seed=0, num_envs=4):
+    """
+    Creates a vectorized Meta-World environment for parallel training.
+    
+    Args:
+        task_name: Name of the Meta-World task
+        max_episode_steps: Maximum steps per episode
+        seed: Base random seed
+        num_envs: Number of parallel environments
+    
+    Returns:
+        Tuple of (vectorized_env, obs_dim, act_dim, act_low, act_high)
+    """
+    from gymnasium.vector import AsyncVectorEnv
+    
+    def make_env(env_seed):
+        """Factory function to create a single environment."""
+        def _init():
+            env, _, _, _, _ = make_metaworld_env(task_name, max_episode_steps, env_seed)
+            return env
+        return _init
+    
+    # Create vectorized environment with different seeds
+    env_fns = [make_env(seed + i) for i in range(num_envs)]
+    vec_env = AsyncVectorEnv(env_fns)
+    
+    # Get dimensions from a single environment
+    _, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
+        task_name, max_episode_steps, seed
+    )
+    
+    return vec_env, obs_dim, act_dim, act_low, act_high

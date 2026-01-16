@@ -73,41 +73,44 @@ class GaussianActor(nn.Module):
 def sample_action(
     mean: jax.Array,
     log_std: jax.Array,
-    key: jax.Array,
+    keys: jax.Array,
 ) -> Tuple[jax.Array, jax.Array]:
-    """Sample an action from the Gaussian policy using reparameterization.
-
-    Uses the reparameterization trick: action = tanh(mean + std * noise)
-    Also computes the log probability with the tanh correction factor.
+    """Sample actions using reparameterization (batched, JAX-safe).
 
     Args:
-        mean: Mean of the Gaussian distribution.
-        log_std: Log standard deviation of the distribution.
-        key: JAX random key for sampling.
+        mean: (B, act_dim)
+        log_std: (B, act_dim)
+        keys: (B, 2) PRNG keys (one per environment)
 
     Returns:
-        Tuple of:
-            - action: Sampled action in [-1, 1], shape (batch_size, act_dim).
-            - log_prob: Log probability of the action, shape (batch_size, 1).
+        action: (B, act_dim) in [-1, 1]
+        log_prob: (B, 1)
     """
     std = jnp.exp(log_std)
 
-    # Reparameterization trick
-    noise = jax.random.normal(key, shape=mean.shape)
+    # Sample noise independently per environment
+    noise = jax.vmap(
+        lambda k: jax.random.normal(k, shape=mean.shape[1:])
+    )(keys)
+
     z = mean + std * noise
 
-    # Tanh squashing to [-1, 1]
+    # Tanh squashing
     action = jnp.tanh(z)
 
-    # Log probability with tanh correction (Jacobian of tanh transform)
-    # log_prob = log_prob_gaussian - log(1 - tanh(z)^2)
-    log_prob = -0.5 * (jnp.log(2 * jnp.pi) + 2 * log_std + ((z - mean) / std) ** 2)
-    # Sum over action dimensions
+    # Gaussian log-prob
+    log_prob = -0.5 * (
+        jnp.log(2 * jnp.pi)
+        + 2 * log_std
+        + ((z - mean) / std) ** 2
+    )
     log_prob = jnp.sum(log_prob, axis=-1, keepdims=True)
 
-    # Tanh correction factor
-    log_prob = log_prob - jnp.sum(
-        jnp.log(1.0 - action**2 + 1e-6), axis=-1, keepdims=True
+    # Tanh correction
+    log_prob -= jnp.sum(
+        jnp.log(1.0 - action**2 + 1e-6),
+        axis=-1,
+        keepdims=True,
     )
 
     return action, log_prob

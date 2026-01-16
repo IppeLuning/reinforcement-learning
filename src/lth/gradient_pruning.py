@@ -147,9 +147,11 @@ def compute_gradients_from_batch(
         # Get mean and log_std from actor
         mean, log_std = agent.state.actor_apply_fn(actor_params, batch.obs)
         
-        # Sample actions
+        # Sample actions with batch of keys
+        batch_size = batch.obs.shape[0]
         key = jax.random.PRNGKey(0)  # Fixed key for deterministic gradients
-        action, log_prob = sample_action(mean, log_std, key)
+        keys = jax.random.split(key, batch_size)  # Split into batch_size keys
+        action, log_prob = sample_action(mean, log_std, keys)
         
         # Compute Q-values
         q1, q2 = agent.state.critic_apply_fn(
@@ -176,7 +178,9 @@ def compute_gradients_from_batch(
         )
         
         # Compute target Q-values (using target params)
+        batch_size = batch.obs.shape[0]
         key = jax.random.PRNGKey(0)
+        keys = jax.random.split(key, batch_size)  # Split into batch_size keys
         from src.networks.actor import sample_action
         
         # Get next action from actor
@@ -184,7 +188,7 @@ def compute_gradients_from_batch(
             agent.state.actor_params,
             batch.next_obs
         )
-        next_action, next_log_prob = sample_action(next_mean, next_log_std, key)
+        next_action, next_log_prob = sample_action(next_mean, next_log_std, keys)
         
         target_q1, target_q2 = agent.state.critic_apply_fn(
             agent.state.target_critic_params,

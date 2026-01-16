@@ -244,3 +244,184 @@ def run_training_loop(
     }
 
     return stats
+
+
+def run_training_loop_vectorized(
+    env,  # AsyncVectorEnv
+    agent,
+    replay_buffer,
+    total_env_steps: int,
+    start_steps: int,
+    batch_size: int,
+    eval_interval: int,
+    save_dir: str,
+    seed: int,
+    task_name: str,
+    max_episode_steps: int = 500,
+    target_mean_success: Optional[float] = None,
+    patience: int = 10,
+    updates_per_step: int = 1,
+    eval_episodes: int = 5,
+    checkpointer=None,
+):
+    start_time = time.time()
+
+    os.makedirs(save_dir, exist_ok=True)
+    metrics_path = os.path.join(save_dir, "metrics.jsonl")
+    episodes_path = os.path.join(save_dir, "train_episodes.jsonl")
+
+    for p in [metrics_path, episodes_path]:
+        if os.path.exists(p):
+            os.remove(p)
+
+    # Create a separate single environment for evaluation
+    from src.envs import make_metaworld_env
+    eval_env, _, _, _, _ = make_metaworld_env(task_name, max_episode_steps, seed + 99999)
+
+    # --- Init ---
+    obs, _ = env.reset(seed=seed)
+    num_envs = env.num_envs
+
+    episode_return = np.zeros(num_envs)
+    episode_success = np.zeros(num_envs)
+    episode_len = np.zeros(num_envs)
+
+    best_return = -np.inf
+    best_success = 0.0
+    success_streak = 0
+    stop_reason = "max_steps"
+
+    train_metrics_buffer = defaultdict(list)
+    metrics_history = []
+
+    env_steps = 0
+
+    while env_steps < total_env_steps:
+        # 1. Action selection
+        if env_steps < start_steps:
+            actions = np.stack([
+                env.single_action_space.sample()
+                for _ in range(num_envs)
+            ])
+        else:
+            actions = agent.select_action(obs, eval_mode=False)
+
+        # 2. Step environments
+        next_obs, rewards, terminated, truncated, infos = env.step(actions)
+        dones = np.logical_or(terminated, truncated)
+        
+        # Extract success info from each environment
+        # In AsyncVectorEnv, infos is a dict where each key maps to arrays/lists
+        success_values = []
+        if isinstance(infos, dict) and "success" in infos:
+            # Success is already an array
+            success_values = infos["success"]
+        elif isinstance(infos, (tuple, list)):
+            # Tuple/list of info dicts (one per env)
+            success_values = [info.get("success", 0.0) for info in infos]
+        else:
+            # Fallback - no success info available
+            success_values = [0.0] * num_envs
+
+        # 3. Store transitions
+        for i in range(num_envs):
+            replay_buffer.store(
+                obs[i],
+                actions[i],
+                rewards[i],
+                next_obs[i],
+                float(dones[i]),
+            )
+
+        # 4. Episode bookkeeping
+        for i in range(num_envs):
+            episode_return[i] += rewards[i]
+            episode_success[i] = max(
+                episode_success[i],
+                float(success_values[i]),
+            )
+            episode_len[i] += 1
+
+            if dones[i]:
+                append_to_jsonl(episodes_path, {
+                    "step": env_steps,
+                    "episode_return": episode_return[i],
+                    "episode_success": episode_success[i],
+                    "episode_length": episode_len[i],
+                    "env_id": i,
+                    "wall_time": time.time() - start_time,
+                })
+
+                episode_return[i] = 0.0
+                episode_success[i] = 0.0
+                episode_len[i] = 0
+
+        obs = next_obs
+        env_steps += num_envs
+
+        # 5. Training updates
+        if env_steps >= start_steps and replay_buffer.is_ready(batch_size):
+            for _ in range(updates_per_step * num_envs):
+                metrics = agent.update(replay_buffer, batch_size)
+                for k, v in metrics.items():
+                    train_metrics_buffer[k].append(float(v))
+
+        # 6. Evaluation
+        if env_steps % eval_interval < num_envs:
+            eval_metrics = evaluate(
+                eval_env,
+                agent=agent,
+                num_episodes=eval_episodes,
+            )
+
+            avg_train_metrics = {
+                f"train/{k}": np.mean(v) if v else 0.0
+                for k, v in train_metrics_buffer.items()
+            }
+            train_metrics_buffer.clear()
+
+            log = {
+                "step": env_steps,
+                "wall_time": time.time() - start_time,
+                **eval_metrics,
+                **avg_train_metrics,
+            }
+            append_to_jsonl(metrics_path, log)
+            metrics_history.append(log)
+
+            mean_ret = eval_metrics["mean_return"]
+            mean_succ = eval_metrics["mean_success"]
+
+            print(
+                f"[Eval] Step {env_steps:>7} | "
+                f"Ret {mean_ret:>6.1f} | "
+                f"Succ {mean_succ:>4.2f} | "
+                f"Alpha {agent.alpha:.3f}"
+            )
+
+            if mean_ret > best_return:
+                best_return = mean_ret
+                best_success = mean_succ
+                success_streak = 0
+                checkpointer.save(agent.state, "checkpoint_best")
+            else:
+                success_streak += 1
+
+            if target_mean_success and success_streak >= patience:
+                stop_reason = "early_stopping"
+                break
+
+    checkpointer.save(agent.state, "checkpoint_final")
+    
+    # Clean up eval environment
+    eval_env.close()
+
+    return {
+        "task": task_name,
+        "seed": seed,
+        "stop_reason": stop_reason,
+        "best_return": best_return,
+        "best_success": best_success,
+        "wall_time_sec": time.time() - start_time,
+        "metrics_history": metrics_history,
+    }

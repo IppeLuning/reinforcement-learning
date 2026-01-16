@@ -4,8 +4,8 @@ from typing import Any, Dict
 
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
-from src.envs import make_metaworld_env
-from src.training import run_training_loop
+from src.envs import make_metaworld_env, make_metaworld_env_vectorized
+from src.training import run_training_loop, run_training_loop_vectorized
 from src.utils import Checkpointer, set_seed
 
 
@@ -41,9 +41,17 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
 
     # 2. Initialize Environment & Seeding
     set_seed(seed)
-    env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-        task_name, hp["max_episode_steps"], seed
-    )
+    num_envs = hp.get("num_envs", 1)
+    
+    if num_envs > 1:
+        env, obs_dim, act_dim, act_low, act_high = make_metaworld_env_vectorized(
+            task_name, hp["max_episode_steps"], seed, num_envs
+        )
+        print(f"  > Using {num_envs} parallel environments")
+    else:
+        env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
+            task_name, hp["max_episode_steps"], seed
+        )
 
     # 3. Initialize Agent
     # For Dense training, use_masking is ALWAYS False
@@ -81,23 +89,43 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
     checkpointer.save(agent.state, filename="checkpoint_init")
 
     # 6. Run Training
-    stats = run_training_loop(
-        env=env,
-        agent=agent,
-        replay_buffer=buffer,
-        total_steps=total_steps,
-        start_steps=start_steps,
-        batch_size=hp["batch_size"],
-        eval_interval=hp["eval_interval"],
-        save_dir=save_dir,
-        seed=seed,
-        task_name=task_name,
-        target_mean_success=params.get("target_mean_success", None),
-        patience=params.get("patience", 20),
-        updates_per_step=params.get("updates_per_step", 1),
-        eval_episodes=hp.get("eval_episodes", 5),
-        checkpointer=checkpointer,
-    )
+    if num_envs > 1:
+        stats = run_training_loop_vectorized(
+            env=env,
+            agent=agent,
+            replay_buffer=buffer,
+            total_env_steps=total_steps,
+            start_steps=start_steps,
+            batch_size=hp["batch_size"],
+            eval_interval=hp["eval_interval"],
+            save_dir=save_dir,
+            seed=seed,
+            task_name=task_name,
+            max_episode_steps=hp["max_episode_steps"],
+            target_mean_success=params.get("target_mean_success", None),
+            patience=params.get("patience", 20),
+            updates_per_step=params.get("updates_per_step", 1),
+            eval_episodes=hp.get("eval_episodes", 5),
+            checkpointer=checkpointer,
+        )
+    else:
+        stats = run_training_loop(
+            env=env,
+            agent=agent,
+            replay_buffer=buffer,
+            total_steps=total_steps,
+            start_steps=start_steps,
+            batch_size=hp["batch_size"],
+            eval_interval=hp["eval_interval"],
+            save_dir=save_dir,
+            seed=seed,
+            task_name=task_name,
+            target_mean_success=params.get("target_mean_success", None),
+            patience=params.get("patience", 20),
+            updates_per_step=params.get("updates_per_step", 1),
+            eval_episodes=hp.get("eval_episodes", 5),
+            checkpointer=checkpointer,
+        )
 
     # 7. Save replay buffer for gradient-based pruning
     print(f"  > Saving replay buffer...")
