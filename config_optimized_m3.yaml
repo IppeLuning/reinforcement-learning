@@ -17,6 +17,7 @@ hyperparameters:
   hidden_dims: [256, 256, 256]
   eval_episodes: 10
   updates_per_step: 4  # OPTIMIZED: 4 gradient updates per env step (was 1)
+  save_init_at_step: 0  # Step at which to save initial weights (W0). 0 = before training starts
   
   # Default Hyperparameters (Base SAC)
   defaults:

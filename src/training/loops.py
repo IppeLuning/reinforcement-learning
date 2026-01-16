@@ -59,6 +59,7 @@ def run_training_loop(
     updates_per_step: int = 1,
     eval_episodes: int = 5,
     checkpointer: Optional[Checkpointer] = None,
+    save_init_at_step: int = 0,
 ) -> Dict[str, Any]:
     """Core training loop for SAC agent with LTH support."""
     start_time = time.time()
@@ -167,6 +168,11 @@ def run_training_loop(
                 for k, v in metrics.items():
                     train_metrics_buffer[k].append(float(v))
 
+        # 5b. Save Initial Weights at specified step (if not saved at step 0)
+        if save_init_at_step > 0 and step == save_init_at_step and checkpointer is not None:
+            print(f"  > Saving W0 (checkpoint_init.pkl) at step {step}...")
+            checkpointer.save(agent.state, filename="checkpoint_init")
+
         # 6. Evaluation & Logging
         if step % eval_interval == 0:
             # Evaluate
@@ -263,6 +269,7 @@ def run_training_loop_vectorized(
     updates_per_step: int = 1,
     eval_episodes: int = 5,
     checkpointer=None,
+    save_init_at_step: int = 0,
 ):
     start_time = time.time()
 
@@ -365,6 +372,13 @@ def run_training_loop_vectorized(
                 metrics = agent.update(replay_buffer, batch_size)
                 for k, v in metrics.items():
                     train_metrics_buffer[k].append(float(v))
+
+        # 5b. Save Initial Weights at specified step (if not saved at step 0)
+        if save_init_at_step > 0 and env_steps >= save_init_at_step and checkpointer is not None:
+            # Check if we just crossed the save_init_at_step threshold
+            if env_steps - num_envs < save_init_at_step:
+                print(f"  > Saving W0 (checkpoint_init.pkl) at step {env_steps}...")
+                checkpointer.save(agent.state, filename="checkpoint_init")
 
         # 6. Evaluation
         if env_steps % eval_interval < num_envs:

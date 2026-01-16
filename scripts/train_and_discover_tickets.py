@@ -97,11 +97,17 @@ def run_ticket_discovery(task_name: str, seed: int, config: dict, output_dir: st
         seed=seed,
     )
 
-    # 2. CRITICAL: Save Initial Weights (W0)
-    # We save this *before* training starts. This is the "Ticket".
+    # 2. Infrastructure
     checkpointer = Checkpointer(output_dir)
-    print(f"  > Saving Initial Weights (W0)...")
-    checkpointer.save(agent.state, filename="checkpoint_init")
+    
+    # Get the step at which to save initialization
+    save_init_at_step = single_cfg.get("save_init_at_step", 0)
+    
+    # CRITICAL: Save Initial Weights (W0)
+    # Save before training starts if save_init_at_step is 0
+    if save_init_at_step == 0:
+        print(f"  > Saving Initial Weights (W0) at step 0...")
+        checkpointer.save(agent.state, filename="checkpoint_init")
 
     # Create replay buffer
     buffer = ReplayBuffer(
@@ -165,6 +171,11 @@ def run_ticket_discovery(task_name: str, seed: int, config: dict, output_dir: st
         if step >= start_steps and buffer.is_ready(batch_size):
             for _ in range(updates_per_step):
                 agent.update(buffer, batch_size)
+
+        # Save Initial Weights at specified step (if not saved at step 0)
+        if save_init_at_step > 0 and step == save_init_at_step:
+            print(f"  > Saving Initial Weights (W0) at step {step}...")
+            checkpointer.save(agent.state, filename="checkpoint_init")
 
         # Evaluation
         if step % eval_interval == 0:

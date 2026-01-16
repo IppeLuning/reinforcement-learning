@@ -84,9 +84,12 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
     checkpointer = Checkpointer(save_dir)
 
     # 5. [CRITICAL LTH STEP] Save Initial Weights (W0)
-    # This must happen before any training updates
-    print(f"  > Saving W0 (checkpoint_init.pkl)...")
-    checkpointer.save(agent.state, filename="checkpoint_init")
+    # Get the step at which to save initialization
+    save_init_at_step = hp.get("save_init_at_step", 0)
+    if save_init_at_step == 0:
+        # Save before any training updates
+        print(f"  > Saving W0 (checkpoint_init.pkl) at step 0...")
+        checkpointer.save(agent.state, filename="checkpoint_init")
 
     # 6. Run Training
     if num_envs > 1:
@@ -107,6 +110,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
             updates_per_step=params.get("updates_per_step", 1),
             eval_episodes=hp.get("eval_episodes", 5),
             checkpointer=checkpointer,
+            save_init_at_step=save_init_at_step,
         )
     else:
         stats = run_training_loop(
@@ -125,6 +129,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
             updates_per_step=params.get("updates_per_step", 1),
             eval_episodes=hp.get("eval_episodes", 5),
             checkpointer=checkpointer,
+            save_init_at_step=save_init_at_step,
         )
 
     # 7. Save replay buffer for gradient-based pruning
