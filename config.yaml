@@ -3,7 +3,7 @@ environments:
     - "reach-v3"
     # - "push-v3" 
     # - "pick-place-v3"
-  seeds: [10] # 5 seeds
+  seeds: [256] # 5 seeds
   
 
 hyperparameters:
@@ -13,7 +13,7 @@ hyperparameters:
   batch_size: 256
   eval_interval: 10000
   replay_buffer_size: 1000000
-  hidden_dims: [256, 256, 256]
+  hidden_dims: [256, 256]
   updates_per_step: 1
   
   # Default Hyperparameters (Base SAC)

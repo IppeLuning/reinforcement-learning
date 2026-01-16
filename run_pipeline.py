@@ -43,4 +43,4 @@ def main(train_agent=True, create_ticket=True, run_ticket=True):
 
 
 if __name__ == "__main__":
-    main(train_agent=False, create_ticket=False, run_ticket=True)
+    main(train_agent=True, create_ticket=False, run_ticket=False)

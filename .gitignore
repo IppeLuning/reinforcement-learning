@@ -5,4 +5,5 @@ checkpoints/
 .DS_Store
 uv.lock
 results_test/
-data/
+masks/
+
