@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 import time
 from collections import defaultdict
+from tracemalloc import start
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import numpy as np
@@ -24,6 +28,21 @@ class Color:
     END = "\033[0m"
 
 
+def append_to_jsonl(path: str, data: Dict[str, Any]):
+    """Helper to append a dictionary as a JSON line to a file."""
+    # Ensure values are serializable (convert numpy types to python native)
+    clean_data = {
+        k: (
+            float(v)
+            if isinstance(v, (np.float32, np.float64))
+            else int(v) if isinstance(v, (np.int32, np.int64)) else v
+        )
+        for k, v in data.items()
+    }
+    with open(path, "a") as f:
+        f.write(json.dumps(clean_data) + "\n")
+
+
 def run_training_loop(
     env: Any,
     agent: SACAgent,
@@ -44,6 +63,19 @@ def run_training_loop(
     """Core training loop for SAC agent with LTH support."""
     start_time = time.time()
 
+    # 0. Setup Logging Files
+    # We save these incrementally so data isn't lost if the run crashes
+    os.makedirs(save_dir, exist_ok=True)
+    metrics_path = os.path.join(save_dir, "metrics.jsonl")
+    episodes_path = os.path.join(save_dir, "train_episodes.jsonl")
+
+    # Wipe files if they exist (start fresh for this run ID)
+    # If you want to resume runs, you'd check for existence instead.
+    if os.path.exists(metrics_path):
+        os.remove(metrics_path)
+    if os.path.exists(episodes_path):
+        os.remove(episodes_path)
+
     # Reset environment
     obs, _ = env.reset(seed=seed)
 
@@ -55,18 +87,22 @@ def run_training_loop(
     # Best performance tracking
     best_return = float("-inf")
     best_success = 0.0
-    all_results = []
-    step = 0
+
+    # Rolling window for console print
+    recent_successes = []
+    recent_returns = []
 
     # Early stopping tracking
     no_improve_count = 0
     success_streak = 0
     stop_reason = "max_steps"
 
-    # Metric tracking
+    # Metric tracking (for final return)
     metrics_history = []
     # Accumulate training losses between evaluations
     train_metrics_buffer = defaultdict(list)
+
+    step = 0
 
     for step in range(1, total_steps + 1):
         # 1. Action Selection
@@ -80,8 +116,6 @@ def run_training_loop(
         terminal = done or truncated
 
         # 3. Store Transition
-        # Note: We store 'done' (termination), not 'truncated' (time limit)
-        # for correct bootstrapping.
         replay_buffer.store(obs, action, reward, next_obs, float(done))
 
         # Update tracking
@@ -92,14 +126,34 @@ def run_training_loop(
 
         # 4. Handle Episode End
         if terminal:
+            # A. Console Logging
+            recent_successes.append(episode_success)
+            recent_returns.append(episode_return)
+            if len(recent_successes) > 100:
+                recent_successes.pop(0)
+
             color = Color.GREEN if episode_success >= 1.0 else Color.RED
-            all_results.append(episode_success)
-            # Optional: Only print every few episodes to reduce clutter
             if episode_success >= 1.0:
                 print(
-                    f"Step {step} | Return: {episode_return:.1f} | {color}Success: {episode_success}{Color.END} | Average Success (last 100): {np.mean(all_results[-100:]):.2f}"
+                    f"Step {step} | Return: {episode_return:.1f} | "
+                    f"{color}Success: {episode_success}{Color.END} | "
+                    f"Avg Succ (100): {np.mean(recent_successes[-100:]):.2f} | "
+                    f"Avg Ret (100): {np.mean(recent_returns[-100:]):.1f} | "
+                    f"Elapsed: {(time.time() - start_time)/60:.1f}min"
                 )
 
+            # B. Disk Logging (High Frequency) [CRITICAL ADDITION]
+            # This captures exactly when the agent solved the task during training
+            episode_log = {
+                "step": step,
+                "episode_return": episode_return,
+                "episode_success": episode_success,
+                "episode_length": episode_len,
+                "wall_time": time.time() - start_time,
+            }
+            append_to_jsonl(episodes_path, episode_log)
+
+            # Reset
             obs, _ = env.reset()
             episode_return = 0.0
             episode_success = 0.0
@@ -108,9 +162,7 @@ def run_training_loop(
         # 5. Training Updates
         if step >= start_steps and replay_buffer.is_ready(batch_size):
             for _ in range(updates_per_step):
-                # Now capturing the metrics!
                 metrics = agent.update(replay_buffer, batch_size)
-
                 # Buffer metrics for logging
                 for k, v in metrics.items():
                     train_metrics_buffer[k].append(float(v))
@@ -125,7 +177,6 @@ def run_training_loop(
                 f"train/{k}": np.mean(v) if v else 0.0
                 for k, v in train_metrics_buffer.items()
             }
-            # Clear buffer
             train_metrics_buffer = defaultdict(list)
 
             # Combine all metrics
@@ -136,6 +187,9 @@ def run_training_loop(
                 **avg_train_metrics,
             }
             metrics_history.append(current_log)
+
+            # C. Disk Logging (Low Frequency) [CRITICAL ADDITION]
+            append_to_jsonl(metrics_path, current_log)
 
             # Console Output
             mean_ret = eval_metrics["mean_return"]
@@ -153,12 +207,11 @@ def run_training_loop(
             if mean_ret > best_return:
                 best_return = mean_ret
                 best_success = mean_succ
-                best_step = step
                 no_improve_count = 0
 
                 checkpointer.save(
                     agent.state,
-                    filename="checkpoint_best",  # Explicit name is safer
+                    filename="checkpoint_best",
                 )
                 print(f"  {Color.BLUE}>> New Best Model Saved{Color.END}")
             else:
@@ -180,16 +233,14 @@ def run_training_loop(
     print(f"{Color.BLUE}>> Saving Final Model...{Color.END}")
     checkpointer.save(agent.state, filename="checkpoint_final")
 
-    # Final Stats
-    total_time = time.time() - start_time
     stats = {
         "task": task_name,
         "seed": seed,
         "stop_reason": stop_reason,
         "best_return": best_return,
         "best_success": best_success,
-        "wall_time_sec": total_time,
-        "metrics_history": metrics_history,
+        "wall_time_sec": time.time() - start_time,
+        "metrics_history": metrics_history,  # Still return this for convenience
     }
 
     return stats

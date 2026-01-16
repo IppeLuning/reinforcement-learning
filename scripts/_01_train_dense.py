@@ -54,7 +54,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
         critic_lr=params.get("critic_lr", 3e-4),
         alpha_lr=params.get("alpha_lr", 3e-4),
         target_entropy_scale=params.get("target_entropy_scale", 1.0),
-        auto_alpha=params.get("auto_alpha", False),  # Fixed Alpha is safer
+        auto_alpha=params.get("auto_alpha", True),  # Enable automatic alpha tuning
         init_alpha=params.get("init_alpha", 0.2),
         hidden_dims=hidden_dims,
         use_masking=False,
@@ -94,7 +94,8 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
         task_name=task_name,
         target_mean_success=params.get("target_mean_success", None),
         patience=params.get("patience", 20),
-        updates_per_step=1,
+        updates_per_step=params.get("updates_per_step", 1),
+        eval_episodes=hp.get("eval_episodes", 5),
         checkpointer=checkpointer,
     )
 

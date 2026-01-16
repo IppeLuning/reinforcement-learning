@@ -58,7 +58,7 @@ def create_mask(
         critic_lr=params.get("critic_lr", 3e-4),
         alpha_lr=params.get("alpha_lr", 3e-4),
         target_entropy_scale=params.get("target_entropy_scale", 1.0),
-        auto_alpha=params.get("auto_alpha", False),
+        auto_alpha=params.get("auto_alpha", True),
         init_alpha=params.get("init_alpha", 0.2),
         hidden_dims=tuple(hp["hidden_dims"]),
         use_masking=False,
