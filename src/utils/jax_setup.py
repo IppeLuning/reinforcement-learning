@@ -23,11 +23,8 @@ def configure_jax_for_m3(verbose: bool = True):
     # Enable Metal GPU on M3
     os.environ["JAX_PLATFORMS"] = "cpu,gpu"
 
-    # Optimize XLA compilation for M3
-    os.environ["XLA_FLAGS"] = (
-        "--xla_gpu_force_compilation_parallelism=1 "
-        "--xla_gpu_enable_async_collectives=true"
-    )
+    # Optimize XLA compilation for M3 (removed invalid flag)
+    os.environ["XLA_FLAGS"] = "--xla_gpu_force_compilation_parallelism=1"
 
     # Enable more aggressive memory preallocation (we have 64GB!)
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"

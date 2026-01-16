@@ -204,6 +204,12 @@ def run_training_loop(
             )
 
             # Save Checkpoints
+            # Save checkpoint at every eval step
+            checkpointer.save(
+                agent.state,
+                filename=f"checkpoint_step_{step}",
+            )
+
             if mean_ret > best_return:
                 best_return = mean_ret
                 best_success = mean_succ

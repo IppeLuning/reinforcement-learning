@@ -4,8 +4,8 @@ from typing import Any, Dict
 
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
-from src.envs import make_metaworld_env
-from src.training import run_training_loop
+from src.envs import make_metaworld_env, make_vectorized_metaworld_env
+from src.training import run_training_loop, run_vectorized_training_loop
 from src.utils import Checkpointer, set_seed
 
 
@@ -39,11 +39,30 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
     total_steps = hp["total_steps"]
     start_steps = hp["start_steps"]
 
+    # Check for parallelization settings
+    parallel_config = cfg["environments"].get("parallel", {})
+    use_parallel = parallel_config.get("enabled", False)
+    num_envs = parallel_config.get("num_envs", 8)
+    strategy = parallel_config.get("strategy", "sync")
+
     # 2. Initialize Environment & Seeding
     set_seed(seed)
-    env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-        task_name, hp["max_episode_steps"], seed
-    )
+
+    if use_parallel:
+        print(f"  > Creating {num_envs} parallel environments ({strategy} mode)...")
+        env, obs_dim, act_dim, act_low, act_high = make_vectorized_metaworld_env(
+            task_name=task_name,
+            max_episode_steps=hp["max_episode_steps"],
+            num_envs=num_envs,
+            strategy=strategy,
+            base_seed=seed,
+        )
+        print(f"  ✓ Parallelization enabled: {num_envs}x speedup expected")
+    else:
+        env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
+            task_name, hp["max_episode_steps"], seed
+        )
+        num_envs = 1  # For compatibility
 
     # 3. Initialize Agent
     # For Dense training, use_masking is ALWAYS False
@@ -80,26 +99,55 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
     print(f"  > Saving W0 (checkpoint_init.pkl)...")
     checkpointer.save(agent.state, filename="checkpoint_init")
 
-    # 6. Run Training
-    stats = run_training_loop(
-        env=env,
-        agent=agent,
-        replay_buffer=buffer,
-        total_steps=total_steps,
-        start_steps=start_steps,
-        batch_size=hp["batch_size"],
-        eval_interval=hp["eval_interval"],
-        save_dir=save_dir,
-        seed=seed,
-        task_name=task_name,
-        target_mean_success=params.get("target_mean_success", None),
-        patience=params.get("patience", 20),
-        updates_per_step=params.get("updates_per_step", 1),
-        eval_episodes=hp.get("eval_episodes", 5),
-        checkpointer=checkpointer,
-    )
+    # 6. Run Training (with or without parallelization)
+    if use_parallel:
+        stats = run_vectorized_training_loop(
+            vec_env=env,
+            agent=agent,
+            replay_buffer=buffer,
+            total_steps=total_steps,
+            start_steps=start_steps,
+            batch_size=hp["batch_size"],
+            eval_interval=hp["eval_interval"],
+            save_dir=save_dir,
+            seed=seed,
+            task_name=task_name,
+            num_envs=num_envs,
+            target_mean_success=params.get("target_mean_success", None),
+            patience=params.get("patience", 20),
+            updates_per_step=params.get("updates_per_step", 1),
+            eval_episodes=hp.get("eval_episodes", 5),
+            checkpointer=checkpointer,
+            max_episode_steps=hp["max_episode_steps"],
+        )
+    else:
+        stats = run_training_loop(
+            env=env,
+            agent=agent,
+            replay_buffer=buffer,
+            total_steps=total_steps,
+            start_steps=start_steps,
+            batch_size=hp["batch_size"],
+            eval_interval=hp["eval_interval"],
+            save_dir=save_dir,
+            seed=seed,
+            task_name=task_name,
+            target_mean_success=params.get("target_mean_success", None),
+            patience=params.get("patience", 20),
+            updates_per_step=params.get("updates_per_step", 1),
+            eval_episodes=hp.get("eval_episodes", 5),
+            checkpointer=checkpointer,
+        )
 
-    # 7. Cleanup
+    # 7. Save replay buffer for gradient-based pruning
+    print(f"  > Saving replay buffer...")
+    buffer_data = buffer.save()
+    import pickle
+
+    with open(os.path.join(save_dir, "replay_buffer.pkl"), "wb") as f:
+        pickle.dump(buffer_data, f)
+
+    # 8. Cleanup
     env.close()
 
     # Save simple JSON log

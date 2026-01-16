@@ -130,3 +130,50 @@ class ReplayBuffer:
             True if buffer has at least batch_size transitions.
         """
         return self.size >= batch_size
+
+    def save(self) -> dict:
+        """Save buffer state to a dictionary.
+
+        Returns:
+            Dictionary containing buffer data and metadata.
+        """
+        return {
+            "obs_buf": self.obs_buf[: self.size],
+            "action_buf": self.action_buf[: self.size],
+            "reward_buf": self.reward_buf[: self.size],
+            "next_obs_buf": self.next_obs_buf[: self.size],
+            "done_buf": self.done_buf[: self.size],
+            "obs_dim": self.obs_dim,
+            "act_dim": self.act_dim,
+            "capacity": self.max_size,
+            "size": self.size,
+        }
+
+    def load(self, data: dict) -> None:
+        """Load buffer state from a dictionary.
+
+        Args:
+            data: Dictionary containing buffer data from save().
+        """
+        size = data["size"]
+        self.obs_buf[:size] = data["obs_buf"]
+        self.action_buf[:size] = data["action_buf"]
+        self.reward_buf[:size] = data["reward_buf"]
+        self.next_obs_buf[:size] = data["next_obs_buf"]
+        self.done_buf[:size] = data["done_buf"]
+        self.size = size
+        self.ptr = size % self.max_size
+
+    @classmethod
+    def create(cls, obs_dim: int, act_dim: int, capacity: int) -> "ReplayBuffer":
+        """Factory method to create a new buffer (for consistency with load).
+
+        Args:
+            obs_dim: Dimension of observations.
+            act_dim: Dimension of actions.
+            capacity: Maximum buffer size.
+
+        Returns:
+            New ReplayBuffer instance.
+        """
+        return cls(obs_dim=obs_dim, act_dim=act_dim, max_size=capacity)
