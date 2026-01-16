@@ -44,3 +44,7 @@ hyperparameters:
 
 pruning:
   sparsity: 0.8
+  # Gradient-based pruning settings (only used when pruning_method="gradient")
+  gradient_method: "taylor"  # Options: "taylor", "gradient", "magnitude"
+  num_gradient_batches: 100  # Number of batches to accumulate gradients over
+  gradient_batch_size: 256   # Batch size for gradient computation

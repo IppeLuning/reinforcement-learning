@@ -14,19 +14,38 @@ import jax.numpy as jnp
 import yaml
 
 from src.agents import SACAgent, SACConfig
+from src.data import ReplayBuffer
 from src.envs import make_metaworld_env
-from src.lth import compute_sparsity, prune_kernels_by_magnitude
+from src.lth import (
+    compute_sparsity,
+    prune_kernels_by_magnitude,
+    prune_kernels_by_gradient_saliency,
+    accumulate_gradient_statistics,
+)
 from src.utils import Checkpointer, set_seed
 
 
 def create_mask(
-    cfg: Dict[str, Any], task_name: str, seed: int, ckpt_dir: str, mask_out_path: str
+    cfg: Dict[str, Any],
+    task_name: str,
+    seed: int,
+    ckpt_dir: str,
+    mask_out_path: str,
+    pruning_method: str = "magnitude",
 ) -> None:
     """
     Executes Step 2 of the LTH pipeline:
     1. Loads 'checkpoint_final.pkl' from the dense run.
-    2. Prunes Actor and Critic parameters (Global Magnitude Pruning).
+    2. Prunes Actor and Critic parameters using selected method.
     3. Saves the resulting masks to 'mask_out_path'.
+    
+    Args:
+        cfg: Configuration dictionary.
+        task_name: Name of the task.
+        seed: Random seed.
+        ckpt_dir: Directory containing checkpoints.
+        mask_out_path: Path to save the mask.
+        pruning_method: "magnitude" or "gradient" pruning.
     """
 
     # 1. Safety Checks
@@ -34,7 +53,7 @@ def create_mask(
         print(f"  [Skip] Mask already exists: {mask_out_path}")
         return
 
-    print(f"  > Creating Mask for {task_name} (Seed {seed})...")
+    print(f"  > Creating {pruning_method.upper()} Mask for {task_name} (Seed {seed})...")
 
     # 2. Re-Initialize Agent (To get the correct State structure for loading)
     # We need to build the model structure to load weights into it.
@@ -81,19 +100,77 @@ def create_mask(
         raise FileNotFoundError(f"Could not find any checkpoints in {ckpt_dir}")
 
     print(f"    Loaded weights from step {restored_state.step}")
+    agent.state = restored_state
 
     # 4. Prune Parameters
     target_sparsity = cfg.get("pruning", {}).get("sparsity", 0.8)  # Default 80%
+    
+    if pruning_method == "magnitude":
+        # MAGNITUDE-BASED PRUNING (Fast, standard LTH)
+        print(f"    Pruning Actor to {target_sparsity:.0%} sparsity (magnitude)...")
+        actor_mask = prune_kernels_by_magnitude(
+            restored_state.actor_params, target_sparsity
+        )
 
-    print(f"    Pruning Actor to {target_sparsity:.0%} sparsity...")
-    actor_mask = prune_kernels_by_magnitude(
-        restored_state.actor_params, target_sparsity
-    )
-
-    print(f"    Pruning Critic to {target_sparsity:.0%} sparsity...")
-    critic_mask = prune_kernels_by_magnitude(
-        restored_state.critic_params, target_sparsity
-    )
+        print(f"    Pruning Critic to {target_sparsity:.0%} sparsity (magnitude)...")
+        critic_mask = prune_kernels_by_magnitude(
+            restored_state.critic_params, target_sparsity
+        )
+        
+    elif pruning_method == "gradient":
+        # GRADIENT-BASED PRUNING (Better performance, requires replay buffer)
+        gradient_method = cfg.get("pruning", {}).get("gradient_method", "taylor")
+        num_gradient_batches = cfg.get("pruning", {}).get("num_gradient_batches", 100)
+        gradient_batch_size = cfg.get("pruning", {}).get("gradient_batch_size", 256)
+        
+        # Load replay buffer
+        replay_path = os.path.join(ckpt_dir, "replay_buffer.pkl")
+        if not os.path.exists(replay_path):
+            raise FileNotFoundError(
+                f"Replay buffer not found at {replay_path}. "
+                "Gradient pruning requires saved replay buffer from dense training."
+            )
+        
+        print(f"    Loading replay buffer from {replay_path}")
+        with open(replay_path, "rb") as f:
+            replay_data = pickle.load(f)
+        
+        replay_buffer = ReplayBuffer.create(
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            capacity=replay_data["capacity"],
+        )
+        replay_buffer.load(replay_data)
+        print(f"    Replay buffer size: {replay_buffer.size}")
+        
+        # Compute gradients
+        print(f"    Computing gradients ({gradient_method}) over {num_gradient_batches} batches...")
+        actor_grads, critic_grads = accumulate_gradient_statistics(
+            agent=agent,
+            replay_buffer=replay_buffer,
+            num_batches=num_gradient_batches,
+            batch_size=gradient_batch_size,
+            normalize_obs=True,
+        )
+        
+        # Prune using gradient saliency
+        print(f"    Pruning Actor to {target_sparsity:.0%} sparsity ({gradient_method} saliency)...")
+        actor_mask = prune_kernels_by_gradient_saliency(
+            params=restored_state.actor_params,
+            gradients=actor_grads,
+            target_sparsity=target_sparsity,
+            method=gradient_method,
+        )
+        
+        print(f"    Pruning Critic to {target_sparsity:.0%} sparsity ({gradient_method} saliency)...")
+        critic_mask = prune_kernels_by_gradient_saliency(
+            params=restored_state.critic_params,
+            gradients=critic_grads,
+            target_sparsity=target_sparsity,
+            method=gradient_method,
+        )
+    else:
+        raise ValueError(f"Unknown pruning_method: {pruning_method}")
 
     # 5. Verify Sparsity
     act_sp = compute_sparsity(actor_mask)
@@ -106,6 +183,7 @@ def create_mask(
         "actor": actor_mask,
         "critic": critic_mask,
         "sparsity_target": target_sparsity,
+        "pruning_method": pruning_method,
         "task": task_name,
         "seed": seed,
     }

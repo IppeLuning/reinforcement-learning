@@ -99,7 +99,14 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
         checkpointer=checkpointer,
     )
 
-    # 7. Cleanup
+    # 7. Save replay buffer for gradient-based pruning
+    print(f"  > Saving replay buffer...")
+    buffer_data = buffer.save()
+    import pickle
+    with open(os.path.join(save_dir, "replay_buffer.pkl"), "wb") as f:
+        pickle.dump(buffer_data, f)
+
+    # 8. Cleanup
     env.close()
 
     # Save simple JSON log
