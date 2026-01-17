@@ -6,6 +6,7 @@ import json
 import os
 import time
 from collections import defaultdict
+from encodings import hp_roman8
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import numpy as np
@@ -55,6 +56,7 @@ def run_vectorized_training_loop(
     seed: int,
     task_name: str,
     num_envs: int,
+    scale_factor: float,
     target_mean_success: Optional[float] = None,
     patience: int = 10,
     updates_per_step: int = 1,
@@ -237,7 +239,7 @@ def run_vectorized_training_loop(
             from src.envs.factory import make_metaworld_env
 
             eval_env, _, _, _, _ = make_metaworld_env(
-                task_name, max_episode_steps, seed=seed
+                task_name, max_episode_steps, scale_factor, seed=seed
             )
 
             # Evaluate

@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 import gymnasium as gym
 import numpy as np
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
+from matplotlib.pyplot import sca
 
 
 class VectorizedMetaWorldEnv:
@@ -85,6 +86,7 @@ class VectorizedMetaWorldEnv:
 def make_vectorized_metaworld_env(
     task_name: str,
     max_episode_steps: int,
+    scale_factor: float,
     num_envs: int = 4,
     strategy: str = "sync",
     base_seed: int = 0,
@@ -112,7 +114,7 @@ def make_vectorized_metaworld_env(
     # Each env needs a unique seed for diversity
     env_fns = [
         lambda i=i: make_metaworld_env(
-            task_name, max_episode_steps, seed=base_seed + i
+            task_name, max_episode_steps, scale_factor, seed=base_seed + i
         )[
             0
         ]  # [0] to get just the env, not the metadata
@@ -124,7 +126,7 @@ def make_vectorized_metaworld_env(
 
     # Get environment metadata from the first environment
     single_env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-        task_name, max_episode_steps, seed=base_seed
+        task_name, max_episode_steps, scale_factor, seed=base_seed
     )
     single_env.close()
 

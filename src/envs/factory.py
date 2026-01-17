@@ -109,7 +109,7 @@ class SuccessBonusWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
-def make_metaworld_env(task_name, max_episode_steps, seed=0):
+def make_metaworld_env(task_name, max_episode_steps, scale_factor, seed=0):
     """
     Constructs a fully wrapped, SAC-compatible Meta-World environment.
     """
@@ -129,7 +129,7 @@ def make_metaworld_env(task_name, max_episode_steps, seed=0):
     env = MetaWorldTaskSampler(env, ml1, mode="train")
 
     # 4. Scale Rewards (Shrink 10,000 -> 10.0)
-    env = TransformReward(env, lambda r: r / 10.0)
+    env = TransformReward(env, lambda r: r / scale_factor)
 
     # 5. Add Success Bonus (+10.0)
     # env = SuccessBonusWrapper(env, bonus=10.0)

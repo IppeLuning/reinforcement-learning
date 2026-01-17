@@ -2,6 +2,8 @@ import json
 import os
 from typing import Any, Dict
 
+from matplotlib.pyplot import sca
+
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
 from src.envs import make_metaworld_env, make_vectorized_metaworld_env
@@ -53,6 +55,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
         env, obs_dim, act_dim, act_low, act_high = make_vectorized_metaworld_env(
             task_name=task_name,
             max_episode_steps=hp["max_episode_steps"],
+            scale_factor=hp.get("scale_rewards", 10),
             num_envs=num_envs,
             strategy=strategy,
             base_seed=seed,
@@ -60,7 +63,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
         print(f"  ✓ Parallelization enabled: {num_envs}x speedup expected")
     else:
         env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-            task_name, hp["max_episode_steps"], seed
+            task_name, hp["max_episode_steps"], hp.get("scale_rewards", 10), seed
         )
         num_envs = 1  # For compatibility
 
@@ -113,6 +116,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
             seed=seed,
             task_name=task_name,
             num_envs=num_envs,
+            scale_factor=hp.get("scale_rewards", 10),
             target_mean_success=params.get("target_mean_success", None),
             patience=params.get("patience", 20),
             updates_per_step=params.get("updates_per_step", 1),
