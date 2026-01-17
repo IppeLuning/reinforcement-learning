@@ -106,8 +106,11 @@ def train_mask(
         mask_data = pickle.load(f)
         actor_mask = mask_data["actor"]
         critic_mask = mask_data["critic"]
-        # Use defaults if sparsity metadata isn't present
-        sparsity = mask_data.get("sparsity_target", 0.0)
+        # Get sparsity from iteration masks or final mask
+        actor_sparsity = mask_data.get("actor_sparsity", mask_data.get("sparsity_target", 0.0))
+        critic_sparsity = mask_data.get("critic_sparsity", mask_data.get("sparsity_target", 0.0))
+        # Use average for display
+        sparsity = (actor_sparsity + critic_sparsity) / 2
 
     # 5. Rewind to Ticket (W0 * Mask)
     # This assumes the dense training was done on the same seed and saved to standard path.
@@ -122,6 +125,7 @@ def train_mask(
         dense_ckpt_dir=dense_ckpt_dir,
         actor_mask=actor_mask,
         critic_mask=critic_mask,
+        w0_filename=cfg["pruning"].get("w0_checkpoint", "checkpoint_step_20000.pkl"),
     )
 
     print(f"    Ticket successfully constructed (Sparsity ~{sparsity:.0%}).")

@@ -18,6 +18,7 @@ def main(
     create_ticket=True,
     run_ticket=True,
     pruning_method="gradient",  # "magnitude" or "gradient"
+    use_iterative_pruning=False,  # Enable iterative pruning
 ):
     """Run the lottery ticket hypothesis pipeline.
 
@@ -26,6 +27,7 @@ def main(
         create_ticket: Whether to create pruning masks.
         run_ticket: Whether to train lottery tickets.
         pruning_method: Pruning method - "magnitude" (faster) or "gradient" (better performance).
+        use_iterative_pruning: Whether to use iterative pruning instead of one-shot.
     """
     with open("config.yaml", "r") as f:
         cfg = yaml.safe_load(f)
@@ -61,21 +63,50 @@ def main(
                 train_dense(cfg, task, seed, ckpt_dir)
 
             if create_ticket:
-                create_mask(
-                    cfg, task, seed, ckpt_dir, mask_path, pruning_method=pruning_method
-                )
+                if use_iterative_pruning:
+                    from scripts.iterative_pruning import iterative_pruning
+                    print(f"\n  >> Using ITERATIVE PRUNING <<")
+                    iterative_pruning(
+                        cfg, task, seed, ckpt_dir, mask_path, pruning_method=pruning_method
+                    )
+                else:
+                    create_mask(
+                        cfg, task, seed, ckpt_dir, mask_path, pruning_method=pruning_method
+                    )
 
             if run_ticket:
-                ckpt_dir = ckpt_dir + "/ticket_training/gradient" if pruning_method == "gradient" else ckpt_dir + "/ticket_training/magnitude"
-                os.makedirs(ckpt_dir, exist_ok=True)
-                train_mask(cfg, task, seed, mask_path, ckpt_dir)
+                base_ticket_dir = ckpt_dir + "/ticket_training/gradient" if pruning_method == "gradient" else ckpt_dir + "/ticket_training/magnitude"
+                
+                if use_iterative_pruning:
+                    # Train tickets for each iteration
+                    iterative_cfg = cfg.get("pruning", {}).get("iterative", {})
+                    num_iterations = iterative_cfg.get("num_iterations", 4)
+                    
+                    for iteration in range(1, num_iterations + 1):
+                        iteration_dir = os.path.join(base_ticket_dir, f"iteration_{iteration:02d}")
+                        os.makedirs(iteration_dir, exist_ok=True)
+                        
+                        # Load iteration-specific mask
+                        iter_mask_dir = os.path.join(os.path.dirname(mask_path), "iterations")
+                        iter_mask_path = os.path.join(iter_mask_dir, f"mask_iter_{iteration}_{pruning_method}.pkl")
+                        
+                        if os.path.exists(iter_mask_path):
+                            print(f"\n  >> Training Ticket for Iteration {iteration}/{num_iterations}")
+                            train_mask(cfg, task, seed, iter_mask_path, iteration_dir)
+                        else:
+                            print(f"  [Skip] Mask not found for iteration {iteration}: {iter_mask_path}")
+                else:
+                    # Single ticket training (non-iterative)
+                    os.makedirs(base_ticket_dir, exist_ok=True)
+                    train_mask(cfg, task, seed, mask_path, base_ticket_dir)
 
 
 if __name__ == "__main__":
     # Configuration: Set what to run and which pruning method
     main(
-        train_agent=False,
+        train_agent=True,
         create_ticket=True,
         run_ticket=True,
         pruning_method="gradient",  # Options: "magnitude" (faster) or "gradient" (better)
+        use_iterative_pruning=True,  # Set to True for iterative pruning
     )

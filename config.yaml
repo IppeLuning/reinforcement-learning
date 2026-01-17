@@ -62,3 +62,19 @@ hyperparameters:
 
 pruning:
   sparsity: 0.8
+  w0_checkpoint: "checkpoint_init.pkl"  # Which checkpoint to use as W0 for rewinding
+  
+  # Iterative pruning settings
+  iterative:
+    enabled: true              # Set to true for iterative pruning
+    num_iterations: 4          # Number of pruning iterations
+    prune_rate: 0.2            # Fraction to prune per iteration (p = 0.2^n for n iterations)
+    
+    # Training between iterations
+    train_between_iterations: true
+    steps_per_iteration: 50000  # Training steps after each pruning iteration
+    
+  # Gradient pruning settings
+  gradient_method: "taylor"    # "taylor", "gradient", or "magnitude"
+  num_gradient_batches: 100
+  gradient_batch_size: 256
