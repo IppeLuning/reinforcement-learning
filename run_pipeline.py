@@ -75,7 +75,7 @@ if __name__ == "__main__":
     # Configuration: Set what to run and which pruning method
     main(
         train_agent=True,
-        create_ticket=False,
+        create_ticket=True,
         run_ticket=False,
-        pruning_method="gradient",  # Options: "magnitude" (faster) or "gradient" (better)
+        pruning_method="magnitude",  # Options: "magnitude" (faster) or "gradient" (better)
     )

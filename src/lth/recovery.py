@@ -32,7 +32,7 @@ def rewind_to_ticket(
     dense_ckpt_dir: str,
     actor_mask: FrozenDict,
     critic_mask: FrozenDict,
-    w0_filename: str = "checkpoint_init",
+    w0_filename: str = "checkpoint_step_20000.pkl",
 ) -> None:
     """
     Rewinds the agent to its initialization (W0) and applies sparsity masks.

@@ -256,7 +256,13 @@ def create_sac_train_state(
     # Initialize actor
     actor = GaussianActor(act_dim=act_dim, hidden_dims=hidden_dims)
     actor_params = actor.init(actor_key, dummy_obs)
-    actor_optimizer = optax.adam(actor_lr)
+    actor_optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),  # Safety: Prevent massive gradient spikes
+        optax.adamw(  # Fix: Use AdamW for Weight Decay
+            learning_rate=actor_lr,
+            weight_decay=1e-4,  # Fix: Keeps weights small to avoid tanh saturation
+        ),
+    )
     actor_opt_state = actor_optimizer.init(actor_params)
 
     # Initialize twin critics
