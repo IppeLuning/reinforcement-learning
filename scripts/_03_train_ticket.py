@@ -65,6 +65,7 @@ def train_mask(
         env, obs_dim, act_dim, act_low, act_high = make_vectorized_metaworld_env(
             task_name=task_name,
             max_episode_steps=hp["max_episode_steps"],
+            scale_factor=params.get("scale_rewards", 10),
             num_envs=num_envs,
             strategy=strategy,
             base_seed=seed,

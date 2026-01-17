@@ -66,7 +66,7 @@ def main(
                 )
 
             if run_ticket:
-                ckpt_dir = ckpt_dir + "/ticket_training"
+                ckpt_dir = ckpt_dir + "/ticket_training/gradient" if pruning_method == "gradient" else ckpt_dir + "/ticket_training/magnitude"
                 os.makedirs(ckpt_dir, exist_ok=True)
                 train_mask(cfg, task, seed, mask_path, ckpt_dir)
 
@@ -74,8 +74,8 @@ def main(
 if __name__ == "__main__":
     # Configuration: Set what to run and which pruning method
     main(
-        train_agent=True,
+        train_agent=False,
         create_ticket=True,
-        run_ticket=False,
-        pruning_method="magnitude",  # Options: "magnitude" (faster) or "gradient" (better)
+        run_ticket=True,
+        pruning_method="gradient",  # Options: "magnitude" (faster) or "gradient" (better)
     )
