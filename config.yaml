@@ -62,7 +62,7 @@ hyperparameters:
 
 pruning:
   sparsity: 0.8
-  w0_checkpoint: "checkpoint_init.pkl"  # Which checkpoint to use as W0 for rewinding
+  w0_checkpoint: "checkpoint_step_20000.pkl"  # Which checkpoint to use as W0 for rewinding
   
   # Iterative pruning settings
   iterative:
