@@ -54,9 +54,7 @@ hyperparameters:
          # Lower alpha LR = slower alpha decay
 
     push-v3:
-      init_alpha: 1.0
-      target_entropy_scale: 1.0
-      scale_rewards: 1
+      scale_rewards: 2
     pick-place-v3:
       init_alpha: 1.0
       target_mean_success: 0.8

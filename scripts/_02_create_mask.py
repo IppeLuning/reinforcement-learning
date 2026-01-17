@@ -68,7 +68,7 @@ def create_mask(
     # (We don't need to run the env, just get dims)
     set_seed(seed)
     env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-        task_name, hp["max_episode_steps"], hp["scale_rewards"], seed
+        task_name, hp["max_episode_steps"], params["scale_rewards"], seed
     )
 
     # Initialize empty agent

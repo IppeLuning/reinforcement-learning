@@ -72,7 +72,7 @@ def train_mask(
         print(f"    ✓ Parallelization enabled: {num_envs}x speedup expected")
     else:
         env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-            task_name, hp["max_episode_steps"], hp["scale_rewards"], seed
+            task_name, hp["max_episode_steps"], params["scale_rewards"], seed
         )
         num_envs = 1  # For compatibility
 
@@ -146,7 +146,7 @@ def train_mask(
             seed=seed,
             task_name=task_name,  # Use original task_name for env creation
             num_envs=num_envs,
-            scale_factor=hp.get("scale_rewards", 1),
+            scale_factor=params.get("scale_rewards", 1),
             target_mean_success=params.get("target_mean_success", None),
             patience=params.get("patience", 20),
             updates_per_step=params.get("updates_per_step", 1),
