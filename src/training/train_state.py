@@ -1,8 +1,5 @@
 """Custom TrainState for Soft Actor-Critic.
 
-DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
-and reviewed by Marinus van den Ende.
-
 This module defines the state containers that hold all training parameters,
 optimizer states, and masks for the SAC algorithm. The state is designed
 to be compatible with JAX transformations like jit and vmap.
@@ -228,6 +225,8 @@ def create_sac_train_state(
     critic_lr: float = 3e-4,
     alpha_lr: float = 3e-4,
     init_alpha: float = 1.0,
+    actor_hidden_dims: Optional[Sequence[int]] = None,
+    critic_hidden_dims: Optional[Sequence[int]] = None,
 ) -> SACTrainState:
     """Create and initialize a SACTrainState.
 
@@ -237,15 +236,21 @@ def create_sac_train_state(
         key: JAX random key for initialization.
         obs_dim: Dimension of the observation space.
         act_dim: Dimension of the action space.
-        hidden_dims: Hidden layer dimensions for all networks.
+        hidden_dims: Hidden layer dimensions for all networks (fallback).
         actor_lr: Learning rate for actor optimizer.
         critic_lr: Learning rate for critic optimizer.
         alpha_lr: Learning rate for alpha optimizer.
         init_alpha: Initial value for the temperature parameter.
+        actor_hidden_dims: Hidden dims for actor (overrides hidden_dims).
+        critic_hidden_dims: Hidden dims for critics (overrides hidden_dims).
 
     Returns:
         Initialized SACTrainState ready for training.
     """
+    # Use separate dims if provided, else fall back to shared hidden_dims
+    actor_dims = tuple(actor_hidden_dims) if actor_hidden_dims else tuple(hidden_dims)
+    critic_dims = tuple(critic_hidden_dims) if critic_hidden_dims else tuple(hidden_dims)
+
     # Split keys for different initializations
     key, actor_key, critic_key = jax.random.split(key, 3)
 
@@ -254,7 +259,7 @@ def create_sac_train_state(
     dummy_action = jnp.ones((1, act_dim))
 
     # Initialize actor
-    actor = GaussianActor(act_dim=act_dim, hidden_dims=hidden_dims)
+    actor = GaussianActor(act_dim=act_dim, hidden_dims=actor_dims)
     actor_params = actor.init(actor_key, dummy_obs)
     actor_optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),  # Safety: Prevent massive gradient spikes
@@ -266,7 +271,7 @@ def create_sac_train_state(
     actor_opt_state = actor_optimizer.init(actor_params)
 
     # Initialize twin critics
-    critic = TwinQNetwork(hidden_dims=hidden_dims)
+    critic = TwinQNetwork(hidden_dims=critic_dims)
     critic_params = critic.init(critic_key, dummy_obs, dummy_action)
     critic_optimizer = optax.adam(critic_lr)
     critic_opt_state = critic_optimizer.init(critic_params)
