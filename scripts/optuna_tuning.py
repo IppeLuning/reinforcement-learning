@@ -49,10 +49,10 @@ def create_objective(task: str, tuning_steps: int = 100_000):
         # Training hyperparameters
         batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048, 4096])
 
-        print(f"\n{'='*60}")
-        print(f"Trial {trial.number}: actor_lr={actor_lr:.2e}, critic_lr={critic_lr:.2e}")
-        print(f"  actor={actor_hidden}, critic={critic_hidden}, batch={batch_size}")
-        print(f"{'='*60}")
+        print(f"\n{'='*60}", flush=True)
+        print(f"Trial {trial.number}: actor_lr={actor_lr:.2e}, critic_lr={critic_lr:.2e}", flush=True)
+        print(f"  actor={actor_hidden}, critic={critic_hidden}, batch={batch_size}", flush=True)
+        print(f"{'='*60}", flush=True)
 
         # Setup
         seed = 42
@@ -93,9 +93,11 @@ def create_objective(task: str, tuning_steps: int = 100_000):
 
         # Training loop with pruning checkpoints
         obs, _ = env.reset(seed=seed)
-        start_steps = 5000
-        eval_interval = tuning_steps // 5  # 5 pruning checkpoints (more frequent)
-        log_interval = 10000  # Progress every 10k steps
+        start_steps = 2000  # Reduced for faster start
+        eval_interval = tuning_steps // 5  # 5 pruning checkpoints
+        log_interval = 5000  # Progress every 5k steps
+        
+        print(f"  Starting training loop...", flush=True)
 
         for step in range(1, tuning_steps + 1):
             # Action selection
@@ -117,17 +119,17 @@ def create_objective(task: str, tuning_steps: int = 100_000):
 
             # Progress logging
             if step % log_interval == 0:
-                print(f"  Trial {trial.number} | Step {step}/{tuning_steps} ({100*step/tuning_steps:.0f}%)")
+                print(f"  Trial {trial.number} | Step {step}/{tuning_steps} ({100*step/tuning_steps:.0f}%)", flush=True)
 
             # Pruning checkpoint (evaluate and report to Optuna)
             if step % eval_interval == 0:
                 eval_metrics = evaluate(env, agent, num_episodes=5)
                 mean_success = eval_metrics["mean_success"]
-                print(f"  [Eval] Trial {trial.number} | Step {step} | Success: {mean_success:.2%}")
+                print(f"  [Eval] Trial {trial.number} | Step {step} | Success: {mean_success:.2%}", flush=True)
 
                 trial.report(mean_success, step)
                 if trial.should_prune():
-                    print(f"  Trial {trial.number} PRUNED at step {step}")
+                    print(f"  Trial {trial.number} PRUNED at step {step}", flush=True)
                     env.close()
                     raise optuna.TrialPruned()
 
@@ -136,7 +138,7 @@ def create_objective(task: str, tuning_steps: int = 100_000):
         env.close()
         
         final_success = eval_metrics["mean_success"]
-        print(f"  Trial {trial.number} COMPLETE | Final success: {final_success:.2%}")
+        print(f"  Trial {trial.number} COMPLETE | Final success: {final_success:.2%}", flush=True)
         return final_success
 
     return objective
