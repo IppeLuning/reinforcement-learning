@@ -2,6 +2,13 @@
 
 Optimized for M1 Max with 32GB RAM.
 Usage: python scripts/optuna_tuning.py --task push-v3 --n-trials 50
+
+Objective Strategy (Hybrid):
+    - Pruning uses IQM of returns: Gives signal even when success=0%, allowing
+      early termination of bad hyperparameters based on reward trends.
+    - Final ranking uses success rate: The true goal for MetaWorld tasks.
+    This lets us kill obviously bad trials early while selecting winners by
+    what actually matters.
 """
 
 import sys
@@ -21,8 +28,36 @@ import numpy as np
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
 from src.envs import make_metaworld_env, make_vectorized_metaworld_env
-from src.training.evaluation import evaluate
+from src.training.evaluation import evaluate, compute_iqm
 from src.utils import set_seed
+
+
+def evaluate_with_returns(env, agent, num_episodes: int = 5):
+    """Evaluate and return both metrics and raw returns for IQM calculation."""
+    returns = []
+    successes = []
+    
+    for ep in range(num_episodes):
+        obs, _ = env.reset()
+        done, truncated = False, False
+        ep_return = 0.0
+        ep_success = False
+        
+        while not (done or truncated):
+            action = agent.select_action(obs, eval_mode=True)
+            obs, reward, done, truncated, info = env.step(action)
+            ep_return += reward
+            if info.get("success", 0.0) >= 1.0:
+                ep_success = True
+        
+        returns.append(ep_return)
+        successes.append(1.0 if ep_success else 0.0)
+    
+    return {
+        "returns": returns,
+        "mean_success": float(np.mean(successes)),
+        "iqm_return": compute_iqm(returns),
+    }
 
 
 def create_objective(task: str, tuning_steps: int = 100_000, num_envs: int = 8):
@@ -132,27 +167,30 @@ def create_objective(task: str, tuning_steps: int = 100_000, num_envs: int = 8):
             if total_env_steps % log_interval < num_envs:
                 print(f"  Trial {trial.number} | Step {total_env_steps}/{tuning_steps} ({100*total_env_steps/tuning_steps:.0f}%)", flush=True)
 
-            # Pruning checkpoint
+            # Pruning checkpoint - use IQM return for pruning (has signal when success=0)
             if total_env_steps % eval_interval < num_envs:
-                eval_metrics = evaluate(eval_env, agent, num_episodes=5)
+                eval_metrics = evaluate_with_returns(eval_env, agent, num_episodes=5)
+                iqm_return = eval_metrics["iqm_return"]
                 mean_success = eval_metrics["mean_success"]
-                print(f"  [Eval] Trial {trial.number} | Step {total_env_steps} | Success: {mean_success:.2%}", flush=True)
+                print(f"  [Eval] Trial {trial.number} | Step {total_env_steps} | Success: {mean_success:.0%} | IQM Return: {iqm_return:.1f}", flush=True)
 
-                trial.report(mean_success, total_env_steps)
+                # Report IQM return for pruning decisions (continuous signal)
+                trial.report(iqm_return, total_env_steps)
                 if trial.should_prune():
                     print(f"  Trial {trial.number} PRUNED at step {total_env_steps}", flush=True)
                     vec_env.close()
                     eval_env.close()
                     raise optuna.TrialPruned()
 
-        # Final evaluation
-        eval_metrics = evaluate(eval_env, agent, num_episodes=10)
+        # Final evaluation - return SUCCESS RATE as the true objective
+        eval_metrics = evaluate_with_returns(eval_env, agent, num_episodes=10)
         vec_env.close()
         eval_env.close()
         
         final_success = eval_metrics["mean_success"]
-        print(f"  Trial {trial.number} COMPLETE | Final success: {final_success:.2%}", flush=True)
-        return final_success
+        final_iqm = eval_metrics["iqm_return"]
+        print(f"  Trial {trial.number} COMPLETE | Success: {final_success:.0%} | IQM Return: {final_iqm:.1f}", flush=True)
+        return final_success  # Success rate is the true objective
 
     return objective
 

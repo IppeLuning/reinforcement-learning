@@ -40,6 +40,7 @@ python scripts/optuna_tuning.py \
 ## Features
 
 - **Vectorized envs**: 8 parallel environments for ~8x faster data collection
+- **Hybrid objective**: Prunes by IQM return (signal when success=0), ranks by success rate
 - **MedianPruner**: Kills underperforming trials early (5 checkpoints per trial)
 - **SQLite storage**: Auto-resumes interrupted studies
-- **Progress logging**: Shows step progress and eval results
+- **Progress logging**: Shows step progress, success rate, and IQM return
