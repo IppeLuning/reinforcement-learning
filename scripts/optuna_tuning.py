@@ -49,6 +49,11 @@ def create_objective(task: str, tuning_steps: int = 100_000):
         # Training hyperparameters
         batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048, 4096])
 
+        print(f"\n{'='*60}")
+        print(f"Trial {trial.number}: actor_lr={actor_lr:.2e}, critic_lr={critic_lr:.2e}")
+        print(f"  actor={actor_hidden}, critic={critic_hidden}, batch={batch_size}")
+        print(f"{'='*60}")
+
         # Setup
         seed = 42
         set_seed(seed)
@@ -89,7 +94,8 @@ def create_objective(task: str, tuning_steps: int = 100_000):
         # Training loop with pruning checkpoints
         obs, _ = env.reset(seed=seed)
         start_steps = 5000
-        eval_interval = tuning_steps // 3  # 3 pruning checkpoints
+        eval_interval = tuning_steps // 5  # 5 pruning checkpoints (more frequent)
+        log_interval = 10000  # Progress every 10k steps
 
         for step in range(1, tuning_steps + 1):
             # Action selection
@@ -109,21 +115,29 @@ def create_objective(task: str, tuning_steps: int = 100_000):
             if step >= start_steps and buffer.is_ready(batch_size):
                 agent.update(buffer, batch_size)
 
-            # Pruning checkpoint
+            # Progress logging
+            if step % log_interval == 0:
+                print(f"  Trial {trial.number} | Step {step}/{tuning_steps} ({100*step/tuning_steps:.0f}%)")
+
+            # Pruning checkpoint (evaluate and report to Optuna)
             if step % eval_interval == 0:
                 eval_metrics = evaluate(env, agent, num_episodes=5)
                 mean_success = eval_metrics["mean_success"]
+                print(f"  [Eval] Trial {trial.number} | Step {step} | Success: {mean_success:.2%}")
 
                 trial.report(mean_success, step)
                 if trial.should_prune():
+                    print(f"  Trial {trial.number} PRUNED at step {step}")
                     env.close()
                     raise optuna.TrialPruned()
 
         # Final evaluation
         eval_metrics = evaluate(env, agent, num_episodes=10)
         env.close()
-
-        return eval_metrics["mean_success"]
+        
+        final_success = eval_metrics["mean_success"]
+        print(f"  Trial {trial.number} COMPLETE | Final success: {final_success:.2%}")
+        return final_success
 
     return objective
 
@@ -151,7 +165,7 @@ def main():
     study.optimize(
         create_objective(args.task, args.tuning_steps),
         n_trials=args.n_trials,
-        n_jobs=2,  # M1 Max: 2 parallel trials leaves room for JAX Metal
+        n_jobs=1,  # Sequential for cleaner output (parallel can cause JAX issues)
         show_progress_bar=True,
     )
 
