@@ -16,14 +16,16 @@ import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
+import numpy as np
+
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
-from src.envs import make_metaworld_env
+from src.envs import make_metaworld_env, make_vectorized_metaworld_env
 from src.training.evaluation import evaluate
 from src.utils import set_seed
 
 
-def create_objective(task: str, tuning_steps: int = 100_000):
+def create_objective(task: str, tuning_steps: int = 100_000, num_envs: int = 8):
     """Create Optuna objective function for a specific task."""
 
     def objective(trial: optuna.Trial) -> float:
@@ -58,9 +60,13 @@ def create_objective(task: str, tuning_steps: int = 100_000):
         seed = 42
         set_seed(seed)
 
-        env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-            task, max_episode_steps=400, scale_factor=2, seed=seed
+        # Vectorized env for fast data collection
+        vec_env, obs_dim, act_dim, act_low, act_high = make_vectorized_metaworld_env(
+            task, max_episode_steps=400, scale_factor=2,
+            num_envs=num_envs, strategy="sync", base_seed=seed
         )
+        # Single env for evaluation
+        eval_env, _, _, _, _ = make_metaworld_env(task, 400, 2, seed)
 
         config = SACConfig(
             gamma=0.99,
@@ -69,7 +75,7 @@ def create_objective(task: str, tuning_steps: int = 100_000):
             critic_lr=critic_lr,
             alpha_lr=alpha_lr,
             init_alpha=init_alpha,
-            hidden_dims=actor_hidden_dims,  # fallback (not used with separate dims)
+            hidden_dims=actor_hidden_dims,
         )
 
         agent = SACAgent(obs_dim, act_dim, act_low, act_high, config, seed)
@@ -91,51 +97,58 @@ def create_objective(task: str, tuning_steps: int = 100_000):
 
         buffer = ReplayBuffer(obs_dim, act_dim, max_size=500_000)
 
-        # Training loop with pruning checkpoints
-        obs, _ = env.reset(seed=seed)
-        start_steps = 2000  # Reduced for faster start
-        eval_interval = tuning_steps // 5  # 5 pruning checkpoints
-        log_interval = 5000  # Progress every 5k steps
+        # Training loop with vectorized collection
+        obs, _ = vec_env.reset(seed=seed)
+        start_steps = 2000
+        eval_interval = tuning_steps // 5
+        log_interval = 5000
+        total_env_steps = 0
         
-        print(f"  Starting training loop...", flush=True)
+        print(f"  Starting training with {num_envs} parallel envs...", flush=True)
 
-        for step in range(1, tuning_steps + 1):
-            # Action selection
-            if step < start_steps:
-                action = env.action_space.sample()
+        while total_env_steps < tuning_steps:
+            # Action selection for all envs
+            if total_env_steps < start_steps:
+                actions = np.array([vec_env.action_space.sample() for _ in range(num_envs)])
             else:
-                action = agent.select_action(obs, eval_mode=False)
+                actions = np.array([agent.select_action(obs[i], eval_mode=False) for i in range(num_envs)])
 
-            next_obs, reward, done, truncated, info = env.step(action)
-            buffer.store(obs, action, reward, next_obs, float(done))
+            # Step all envs
+            next_obs, rewards, dones, truncateds, infos = vec_env.step(actions)
+            
+            # Store transitions
+            for i in range(num_envs):
+                buffer.store(obs[i], actions[i], rewards[i], next_obs[i], float(dones[i]))
+            
             obs = next_obs
+            total_env_steps += num_envs
 
-            if done or truncated:
-                obs, _ = env.reset()
-
-            # Training
-            if step >= start_steps and buffer.is_ready(batch_size):
-                agent.update(buffer, batch_size)
+            # Training (2 updates per env step for better sample efficiency)
+            if total_env_steps >= start_steps and buffer.is_ready(batch_size):
+                for _ in range(2):
+                    agent.update(buffer, batch_size)
 
             # Progress logging
-            if step % log_interval == 0:
-                print(f"  Trial {trial.number} | Step {step}/{tuning_steps} ({100*step/tuning_steps:.0f}%)", flush=True)
+            if total_env_steps % log_interval < num_envs:
+                print(f"  Trial {trial.number} | Step {total_env_steps}/{tuning_steps} ({100*total_env_steps/tuning_steps:.0f}%)", flush=True)
 
-            # Pruning checkpoint (evaluate and report to Optuna)
-            if step % eval_interval == 0:
-                eval_metrics = evaluate(env, agent, num_episodes=5)
+            # Pruning checkpoint
+            if total_env_steps % eval_interval < num_envs:
+                eval_metrics = evaluate(eval_env, agent, num_episodes=5)
                 mean_success = eval_metrics["mean_success"]
-                print(f"  [Eval] Trial {trial.number} | Step {step} | Success: {mean_success:.2%}", flush=True)
+                print(f"  [Eval] Trial {trial.number} | Step {total_env_steps} | Success: {mean_success:.2%}", flush=True)
 
-                trial.report(mean_success, step)
+                trial.report(mean_success, total_env_steps)
                 if trial.should_prune():
-                    print(f"  Trial {trial.number} PRUNED at step {step}", flush=True)
-                    env.close()
+                    print(f"  Trial {trial.number} PRUNED at step {total_env_steps}", flush=True)
+                    vec_env.close()
+                    eval_env.close()
                     raise optuna.TrialPruned()
 
         # Final evaluation
-        eval_metrics = evaluate(env, agent, num_episodes=10)
-        env.close()
+        eval_metrics = evaluate(eval_env, agent, num_episodes=10)
+        vec_env.close()
+        eval_env.close()
         
         final_success = eval_metrics["mean_success"]
         print(f"  Trial {trial.number} COMPLETE | Final success: {final_success:.2%}", flush=True)
@@ -149,11 +162,13 @@ def main():
     parser.add_argument("--task", type=str, default="push-v3", help="MetaWorld task")
     parser.add_argument("--n-trials", type=int, default=50, help="Number of trials")
     parser.add_argument("--tuning-steps", type=int, default=100_000, help="Steps per trial")
+    parser.add_argument("--num-envs", type=int, default=8, help="Parallel envs (8 for M1 Max)")
+    parser.add_argument("--study-name", type=str, default="study", help="Name of the study")
     args = parser.parse_args()
 
     # Storage for persistence (auto-resumes)
     os.makedirs(f"results/optuna/{args.task}", exist_ok=True)
-    storage = f"sqlite:///results/optuna/{args.task}/study.db"
+    storage = f"sqlite:///results/optuna/{args.task}/{args.study_name}.db"
 
     study = optuna.create_study(
         study_name=f"sac_{args.task}",
@@ -165,7 +180,7 @@ def main():
     )
 
     study.optimize(
-        create_objective(args.task, args.tuning_steps),
+        create_objective(args.task, args.tuning_steps, args.num_envs),
         n_trials=args.n_trials,
         n_jobs=1,  # Sequential for cleaner output (parallel can cause JAX issues)
         show_progress_bar=True,

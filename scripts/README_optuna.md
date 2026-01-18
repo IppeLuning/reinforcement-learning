@@ -3,11 +3,11 @@
 ## Quick Start
 
 ```bash
-# Run tuning (50 trials, 100k steps each)
+# Run tuning (50 trials, 100k steps each, 8 parallel envs)
 python scripts/optuna_tuning.py --task push-v3 --n-trials 50
 
-# Launch dashboard in separate terminal
-optuna-dashboard sqlite:///results/optuna/push-v3/study.db
+# Launch dashboard in separate terminal (use your study name)
+optuna-dashboard sqlite:///results/optuna/push-v3/<study-name>.db
 # Open http://127.0.0.1:8080
 ```
 
@@ -32,11 +32,14 @@ optuna-dashboard sqlite:///results/optuna/push-v3/study.db
 python scripts/optuna_tuning.py \
     --task push-v3 \      # MetaWorld task name
     --n-trials 50 \       # Number of trials
-    --tuning-steps 100000 # Steps per trial
+    --tuning-steps 100000 \ # Steps per trial
+    --num-envs 8 \        # Parallel envs (default: 8 for M1 Max)
+    --study-name study    # Study name (default: "study")
 ```
 
 ## Features
 
+- **Vectorized envs**: 8 parallel environments for ~8x faster data collection
 - **MedianPruner**: Kills underperforming trials early (5 checkpoints per trial)
 - **SQLite storage**: Auto-resumes interrupted studies
 - **Progress logging**: Shows step progress and eval results
