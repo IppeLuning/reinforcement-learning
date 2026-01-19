@@ -62,6 +62,7 @@ def run_vectorized_training_loop(
     updates_per_step: int = 1,
     eval_episodes: int = 5,
     checkpointer: Optional[Checkpointer] = None,
+    rewind_steps: int = 0,
     max_episode_steps: int = 500,
 ) -> Dict[str, Any]:
     """
@@ -114,8 +115,9 @@ def run_vectorized_training_loop(
     train_metrics_buffer = defaultdict(list)
 
     # Total environment steps (across all parallel envs)
-    total_env_steps = 0
+    total_env_steps = num_envs
     step = 0
+    rewind_saved = False
 
     print(f"{Color.BLUE}>> Training with {num_envs} parallel environments{Color.END}")
 
@@ -181,6 +183,13 @@ def run_vectorized_training_loop(
         # Update counters
         total_env_steps += num_envs
         obs = next_obs
+
+        if rewind_steps > 0 and not rewind_saved and total_env_steps >= rewind_steps:
+            print(
+                f"{Color.BLUE}>> Saving Rewind Weights (Step {total_env_steps})...{Color.END}"
+            )
+            checkpointer.save(agent.state, filename="checkpoint_rewind")
+            rewind_saved = True
 
         # 4. Handle episode endings
         for i in range(num_envs):
@@ -341,6 +350,7 @@ def run_training_loop(
     updates_per_step: int = 1,
     eval_episodes: int = 5,
     checkpointer: Optional[Checkpointer] = None,
+    rewind_steps: int = 0,
 ) -> Dict[str, Any]:
     """Core training loop for SAC agent with LTH support (single environment)."""
     start_time = time.time()
@@ -384,6 +394,9 @@ def run_training_loop(
     step = 0
 
     for step in range(1, total_steps + 1):
+        if rewind_steps > 0 and step == rewind_steps:
+            print(f"{Color.BLUE}>> Saving Rewind Weights (Step {step})...{Color.END}")
+            checkpointer.save(agent.state, filename="checkpoint_rewind")
         # 1. Action Selection
         if step < start_steps:
             action = env.action_space.sample()
@@ -392,6 +405,7 @@ def run_training_loop(
 
         # 2. Environment Step
         next_obs, reward, done, truncated, info = env.step(action)
+
         terminal = done or truncated
 
         # 3. Store Transition

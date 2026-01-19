@@ -25,13 +25,14 @@ from src.utils.types import Mask, Params, PRNGKey
 
 
 class SACTrainState(struct.PyTreeNode):
-    """Training state for Soft Actor-Critic.
+    """Training state for Soft Actor-Critic with Lottery Ticket Mask support.
 
     This dataclass holds all the mutable state needed for SAC training:
     - Actor parameters and optimizer state
     - Twin critic parameters, optimizer state, and target parameters
     - Learnable temperature (alpha) and its optimizer state
     - Training step counter
+    - [NEW] Optional binary masks for pruning
 
     All fields are registered as pytree nodes, making the entire state
     compatible with jax.jit and other JAX transformations.
@@ -50,6 +51,8 @@ class SACTrainState(struct.PyTreeNode):
         actor_optimizer: Actor optimizer (not a pytree leaf).
         critic_optimizer: Critic optimizer (not a pytree leaf).
         alpha_optimizer: Alpha optimizer (not a pytree leaf).
+        actor_mask: Optional binary mask for actor (1=keep, 0=prune).
+        critic_mask: Optional binary mask for critic.
     """
 
     # Training step counter
@@ -77,6 +80,10 @@ class SACTrainState(struct.PyTreeNode):
     critic_optimizer: optax.GradientTransformation = struct.field(pytree_node=False)
     alpha_optimizer: optax.GradientTransformation = struct.field(pytree_node=False)
 
+    # [NEW] Optional Masks (part of pytree so they can be jitted)
+    actor_mask: Optional[Mask] = None
+    critic_mask: Optional[Mask] = None
+
     @property
     def alpha(self) -> jax.Array:
         """Current temperature value (exp of log_alpha)."""
@@ -86,18 +93,16 @@ class SACTrainState(struct.PyTreeNode):
         self,
         grads: Params,
     ) -> "SACTrainState":
-        """Apply gradient update to actor parameters.
-
-        Args:
-            grads: Gradients with respect to actor parameters.
-
-        Returns:
-            Updated SACTrainState with new actor parameters.
-        """
+        """Apply gradient update to actor parameters."""
         updates, new_opt_state = self.actor_optimizer.update(
             grads, self.actor_opt_state, self.actor_params
         )
         new_params = optax.apply_updates(self.actor_params, updates)
+
+        # [CRITICAL] Re-apply mask to ensure pruned weights stay zero
+        if self.actor_mask is not None:
+            new_params = jax.tree.map(lambda p, m: p * m, new_params, self.actor_mask)
+
         return self.replace(
             actor_params=new_params,
             actor_opt_state=new_opt_state,
@@ -107,18 +112,16 @@ class SACTrainState(struct.PyTreeNode):
         self,
         grads: Params,
     ) -> "SACTrainState":
-        """Apply gradient update to critic parameters.
-
-        Args:
-            grads: Gradients with respect to critic parameters.
-
-        Returns:
-            Updated SACTrainState with new critic parameters.
-        """
+        """Apply gradient update to critic parameters."""
         updates, new_opt_state = self.critic_optimizer.update(
             grads, self.critic_opt_state, self.critic_params
         )
         new_params = optax.apply_updates(self.critic_params, updates)
+
+        # [CRITICAL] Re-apply mask to ensure pruned weights stay zero
+        if self.critic_mask is not None:
+            new_params = jax.tree.map(lambda p, m: p * m, new_params, self.critic_mask)
+
         return self.replace(
             critic_params=new_params,
             critic_opt_state=new_opt_state,
@@ -128,14 +131,7 @@ class SACTrainState(struct.PyTreeNode):
         self,
         grads: jax.Array,
     ) -> "SACTrainState":
-        """Apply gradient update to temperature parameter.
-
-        Args:
-            grads: Gradient with respect to log_alpha.
-
-        Returns:
-            Updated SACTrainState with new log_alpha.
-        """
+        """Apply gradient update to temperature parameter."""
         updates, new_opt_state = self.alpha_optimizer.update(
             grads, self.alpha_opt_state
         )
@@ -146,77 +142,24 @@ class SACTrainState(struct.PyTreeNode):
         )
 
     def soft_update_target(self, tau: float) -> "SACTrainState":
-        """Perform soft update of target critic parameters.
-
-        target_params = tau * params + (1 - tau) * target_params
-
-        Args:
-            tau: Interpolation factor (typically small, e.g., 0.005).
-
-        Returns:
-            Updated SACTrainState with new target parameters.
-        """
+        """Perform soft update of target critic parameters."""
         new_target_params = jax.tree.map(
             lambda p, tp: tau * p + (1.0 - tau) * tp,
             self.critic_params,
             self.target_critic_params,
         )
+        # Note: If critic_params are masked, target will naturally become masked over time.
+        # But we can enforce it explicitly if we want to be safe.
+        if self.critic_mask is not None:
+            new_target_params = jax.tree.map(
+                lambda p, m: p * m, new_target_params, self.critic_mask
+            )
+
         return self.replace(target_critic_params=new_target_params)
 
     def increment_step(self) -> "SACTrainState":
         """Increment the training step counter."""
         return self.replace(step=self.step + 1)
-
-
-class MaskedTrainState(SACTrainState):
-    """Training state with binary masks for Lottery Ticket experiments.
-
-    Extends SACTrainState with masks that define sparse subnetworks.
-    Masks are applied during forward passes to zero out pruned weights.
-
-    Attributes:
-        actor_mask: Binary mask for actor parameters (1 = keep, 0 = prune).
-        critic_mask: Binary mask for critic parameters.
-    """
-
-    actor_mask: Optional[Mask] = None
-    critic_mask: Optional[Mask] = None
-
-    def apply_masks(self) -> "MaskedTrainState":
-        """Apply masks to parameters (zero out pruned weights).
-
-        Returns:
-            State with masked parameters.
-        """
-        if self.actor_mask is not None:
-            masked_actor = jax.tree.map(
-                lambda p, m: p * m,
-                self.actor_params,
-                self.actor_mask,
-            )
-        else:
-            masked_actor = self.actor_params
-
-        if self.critic_mask is not None:
-            masked_critic = jax.tree.map(
-                lambda p, m: p * m,
-                self.critic_params,
-                self.critic_mask,
-            )
-            masked_target = jax.tree.map(
-                lambda p, m: p * m,
-                self.target_critic_params,
-                self.critic_mask,
-            )
-        else:
-            masked_critic = self.critic_params
-            masked_target = self.target_critic_params
-
-        return self.replace(
-            actor_params=masked_actor,
-            critic_params=masked_critic,
-            target_critic_params=masked_target,
-        )
 
 
 def create_sac_train_state(
@@ -228,24 +171,10 @@ def create_sac_train_state(
     critic_lr: float = 3e-4,
     alpha_lr: float = 3e-4,
     init_alpha: float = 1.0,
+    use_masking: bool = False,  # Legacy argument support (optional)
 ) -> SACTrainState:
-    """Create and initialize a SACTrainState.
+    """Create and initialize a SACTrainState."""
 
-    Initializes all networks with random parameters and sets up optimizers.
-
-    Args:
-        key: JAX random key for initialization.
-        obs_dim: Dimension of the observation space.
-        act_dim: Dimension of the action space.
-        hidden_dims: Hidden layer dimensions for all networks.
-        actor_lr: Learning rate for actor optimizer.
-        critic_lr: Learning rate for critic optimizer.
-        alpha_lr: Learning rate for alpha optimizer.
-        init_alpha: Initial value for the temperature parameter.
-
-    Returns:
-        Initialized SACTrainState ready for training.
-    """
     # Split keys for different initializations
     key, actor_key, critic_key = jax.random.split(key, 3)
 
@@ -257,11 +186,8 @@ def create_sac_train_state(
     actor = GaussianActor(act_dim=act_dim, hidden_dims=hidden_dims)
     actor_params = actor.init(actor_key, dummy_obs)
     actor_optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),  # Safety: Prevent massive gradient spikes
-        optax.adamw(  # Fix: Use AdamW for Weight Decay
-            learning_rate=actor_lr,
-            weight_decay=1e-4,  # Fix: Keeps weights small to avoid tanh saturation
-        ),
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(learning_rate=actor_lr, weight_decay=1e-4),
     )
     actor_opt_state = actor_optimizer.init(actor_params)
 
@@ -279,6 +205,7 @@ def create_sac_train_state(
     alpha_optimizer = optax.adam(alpha_lr)
     alpha_opt_state = alpha_optimizer.init(log_alpha)
 
+    # Return standard state (Masks default to None)
     return SACTrainState(
         step=0,
         actor_params=actor_params,
@@ -293,4 +220,6 @@ def create_sac_train_state(
         actor_optimizer=actor_optimizer,
         critic_optimizer=critic_optimizer,
         alpha_optimizer=alpha_optimizer,
+        actor_mask=None,
+        critic_mask=None,
     )

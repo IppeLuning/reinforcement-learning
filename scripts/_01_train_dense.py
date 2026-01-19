@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any, Dict
 
 from matplotlib.pyplot import sca
@@ -11,7 +12,9 @@ from src.training import run_training_loop, run_vectorized_training_loop
 from src.utils import Checkpointer, set_seed
 
 
-def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -> None:
+def train_dense(
+    cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str, rewind_steps: int
+) -> None:
     """
     Executes Step 1 of the LTH pipeline:
     1. Initializes network.
@@ -32,6 +35,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
     hp = cfg["hyperparameters"]
     defaults = hp["defaults"]
     task_overrides = hp.get("tasks", {}).get(task_name, {})
+    rewind_steps = cfg.get("pruning", {}).get("rewind_steps", 0)
 
     # Merge: Overrides > Defaults
     params = {**defaults, **task_overrides}
@@ -123,6 +127,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
             eval_episodes=hp.get("eval_episodes", 5),
             checkpointer=checkpointer,
             max_episode_steps=hp["max_episode_steps"],
+            rewind_steps=rewind_steps,
         )
     else:
         stats = run_training_loop(
@@ -141,6 +146,7 @@ def train_dense(cfg: Dict[str, Any], task_name: str, seed: int, save_dir: str) -
             updates_per_step=params.get("updates_per_step", 1),
             eval_episodes=hp.get("eval_episodes", 5),
             checkpointer=checkpointer,
+            rewind_steps=rewind_steps,
         )
 
     # 7. Save replay buffer for gradient-based pruning

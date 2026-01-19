@@ -2,10 +2,11 @@
 Step 3: Train the Lottery Ticket (Sparse Network).
 
 This module defines the 'train_mask' function called by run_pipeline.py.
-It implements the "Rewinding" logic:
+It implements the "Late Rewinding" logic:
 1. Load Binary Mask.
-2. Load W0 (Initial weights) via rewind_to_ticket.
-3. Train with 'use_masking=True' to keep weights sparse.
+2. Load the specific Rewind Weights (e.g., from step 20k) explicitly.
+3. Apply mask immediately to zero out weights.
+4. Train with 'use_masking=True' to keep weights sparse.
 """
 
 import json
@@ -14,21 +15,35 @@ import pickle
 from typing import Any, Dict
 
 import yaml
-from matplotlib.pyplot import sca
 
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
 from src.envs import make_metaworld_env, make_vectorized_metaworld_env
-from src.lth.recovery import rewind_to_ticket
 from src.training import run_training_loop, run_vectorized_training_loop
 from src.utils import Checkpointer, set_seed
 
+# Removed unused matplotlib import
+# from matplotlib.pyplot import sca
+
 
 def train_mask(
-    cfg: Dict[str, Any], task_name: str, seed: int, mask_path: str, save_dir: str
+    cfg: Dict[str, Any],
+    task_name: str,
+    seed: int,
+    mask_path: str,
+    save_dir: str,
+    rewind_ckpt_path: str,  # <--- CRITICAL UPDATE: Explicit path to rewind weights
 ) -> None:
     """
-    Executes Step 3 of the LTH pipeline (The Transfer/Ticket Run).
+    Executes Step 3 of the LTH pipeline (The Retraining/Ticket Run).
+
+    Args:
+        cfg: Config dict.
+        task_name: e.g. 'reach-v2'.
+        seed: Random seed.
+        mask_path: Path to the .pkl file containing actor/critic masks.
+        save_dir: Where to save the results of this training run.
+        rewind_ckpt_path: Path to the checkpoint to rewind to (e.g., 'round_0/checkpoint_rewind.pkl').
     """
 
     # Check completion
@@ -65,6 +80,7 @@ def train_mask(
         env, obs_dim, act_dim, act_low, act_high = make_vectorized_metaworld_env(
             task_name=task_name,
             max_episode_steps=hp["max_episode_steps"],
+            scale_factor=params["scale_rewards"],
             num_envs=num_envs,
             strategy=strategy,
             base_seed=seed,
@@ -99,7 +115,7 @@ def train_mask(
         seed=seed,
     )
 
-    # 4. Load the Masks (CRITICAL: Must be done before rewinding)
+    # 4. Load the Masks (CRITICAL: Must be done before rewinding logic)
     print(f"    Loading mask from: {mask_path}")
     with open(mask_path, "rb") as f:
         mask_data = pickle.load(f)
@@ -108,31 +124,43 @@ def train_mask(
         # Use defaults if sparsity metadata isn't present
         sparsity = mask_data.get("sparsity_target", 0.0)
 
-    # 5. Rewind to Ticket (W0 * Mask)
-    # This assumes the dense training was done on the same seed and saved to standard path.
-    # Standard path: data/checkpoints/{task_name}/seed_{seed}
-    dense_ckpt_dir = os.path.join("data", "checkpoints", task_name, f"seed_{seed}")
+    # 5. REWINDING: Load the specific checkpoint (Winning Ticket Initialization)
+    if not os.path.exists(rewind_ckpt_path):
+        raise FileNotFoundError(f"Rewind checkpoint not found at: {rewind_ckpt_path}")
 
-    # NOTE: If doing transfer (using Task A mask on Task B), 'mask_path' comes from A,
-    # but 'dense_ckpt_dir' must point to B's initialization to get the correct W0 for this seed.
+    print(f"    Rewinding weights to anchor: {rewind_ckpt_path}")
 
-    rewind_to_ticket(
-        agent=agent,
-        dense_ckpt_dir=dense_ckpt_dir,
-        actor_mask=actor_mask,
-        critic_mask=critic_mask,
-    )
+    # We use the Checkpointer to load the state, but we point it to the directory
+    # containing the rewind file.
+    rewind_dir = os.path.dirname(rewind_ckpt_path)
+    rewind_filename = os.path.basename(rewind_ckpt_path)
 
-    print(f"    Ticket successfully constructed (Sparsity ~{sparsity:.0%}).")
+    # Initialize a temporary checkpointer just for loading
+    loader = Checkpointer(rewind_dir)
+    restored_state = loader.restore(agent.state, item=rewind_filename)
 
-    # 6. Infrastructure
+    if restored_state is None:
+        raise ValueError(f"Failed to restore rewind checkpoint from {rewind_ckpt_path}")
+
+    agent.state = restored_state
+
+    # 6. APPLY MASK
+    # Now that weights are reset to T=k, we must zero out the pruned weights.
+    # Because use_masking=True, this also registers them as non-trainable.
+    print(f"    Applying mask (Sparsity ~{sparsity:.0%})...")
+    agent.apply_mask(actor_mask, critic_mask)
+
+    # 7. Infrastructure
     buffer = ReplayBuffer(
         obs_dim, act_dim, max_size=hp.get("replay_buffer_size", 1_000_000)
     )
 
     ticket_checkpointer = Checkpointer(save_dir)
 
-    # 7. Run Training (Sparse) with or without parallelization
+    # 8. Run Training (Sparse)
+    # Note: We pass rewind_steps=0 because we don't want to save a NEW rewind anchor
+    # during this retraining phase.
+
     if use_parallel:
         stats = run_vectorized_training_loop(
             vec_env=env,
@@ -144,7 +172,7 @@ def train_mask(
             eval_interval=hp["eval_interval"],
             save_dir=save_dir,
             seed=seed,
-            task_name=task_name,  # Use original task_name for env creation
+            task_name=task_name,
             num_envs=num_envs,
             scale_factor=params.get("scale_rewards", 1),
             target_mean_success=params.get("target_mean_success", None),
@@ -152,6 +180,7 @@ def train_mask(
             updates_per_step=params.get("updates_per_step", 1),
             eval_episodes=hp.get("eval_episodes", 5),
             checkpointer=ticket_checkpointer,
+            rewind_steps=0,  # <--- Do not save rewind anchor in ticket runs
             max_episode_steps=hp["max_episode_steps"],
         )
     else:
@@ -165,14 +194,21 @@ def train_mask(
             eval_interval=hp["eval_interval"],
             save_dir=save_dir,
             seed=seed,
-            task_name=task_name,  # Use original task_name for env creation
+            task_name=task_name,
             target_mean_success=params.get("target_mean_success", None),
             patience=params.get("patience", 20),
             updates_per_step=1,
             checkpointer=ticket_checkpointer,
+            rewind_steps=0,  # <--- Do not save rewind anchor in ticket runs
         )
 
-    # 8. Cleanup
+    print(f"  > Saving replay buffer (required for next pruning round)...")
+    buffer_data = buffer.save()
+
+    # We use 'replay_buffer.pkl' standard name so create_mask can find it
+    with open(os.path.join(save_dir, "replay_buffer.pkl"), "wb") as f:
+        pickle.dump(buffer_data, f)
+    # 9. Cleanup
     env.close()
 
     # Save Results

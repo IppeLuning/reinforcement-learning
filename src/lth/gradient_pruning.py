@@ -20,6 +20,7 @@ def prune_kernels_by_gradient_saliency(
     gradients: Params,
     target_sparsity: float = 0.8,
     method: str = "taylor",
+    prev_mask: Optional[Params] = None,  # <--- Added Argument
 ) -> Params:
     """
     Prune kernels based on gradient saliency (gradient * weight importance).
@@ -35,6 +36,8 @@ def prune_kernels_by_gradient_saliency(
             - "taylor": |w * grad| (first-order Taylor expansion)
             - "gradient": |grad| only (pure gradient magnitude)
             - "magnitude": |w| only (standard magnitude pruning)
+        prev_mask: (Optional) Mask from previous round. Weights that are 0 here
+                   will be forced to 0 in the new mask.
 
     Returns:
         Binary mask (1 = keep, 0 = prune)
@@ -42,10 +45,18 @@ def prune_kernels_by_gradient_saliency(
     flat_params_with_path, tree_def = jax.tree_util.tree_flatten_with_path(params)
     flat_grads_with_path, _ = jax.tree_util.tree_flatten_with_path(gradients)
 
+    # Flatten previous mask if it exists
+    if prev_mask is not None:
+        flat_prev_mask, _ = jax.tree_util.tree_flatten(prev_mask)
+    else:
+        flat_prev_mask = [None] * len(flat_params_with_path)
+
     # Collect kernel saliency scores
     saliency_values = []
 
-    for (path, param), (_, grad) in zip(flat_params_with_path, flat_grads_with_path):
+    for (path, param), (_, grad), prev_m_leaf in zip(
+        flat_params_with_path, flat_grads_with_path, flat_prev_mask
+    ):
         # Check if this is a kernel (weight) parameter
         is_kernel = any(
             isinstance(node, jax.tree_util.DictKey) and node.key == "kernel"
@@ -61,10 +72,20 @@ def prune_kernels_by_gradient_saliency(
                 # Pure gradient magnitude
                 saliency = jnp.abs(grad).flatten()
             elif method == "magnitude":
-                # Standard magnitude pruning (for comparison)
+                # Standard magnitude pruning
                 saliency = jnp.abs(param).flatten()
             else:
                 raise ValueError(f"Unknown method: {method}")
+
+            # [ITERATIVE PRUNING LOGIC]
+            # If we have a previous mask, we must ensure that previously pruned weights
+            # are NOT considered for the threshold calculation (or effectively stay at the bottom).
+            # We set their saliency to -1.0 (assuming normal saliency is >= 0).
+            if prev_m_leaf is not None:
+                # Flatten mask to match saliency shape
+                flat_pm = prev_m_leaf.flatten()
+                # Where mask is 0, set saliency to -1.0
+                saliency = jnp.where(flat_pm == 0, -1.0, saliency)
 
             saliency_values.append(saliency)
 
@@ -72,21 +93,32 @@ def prune_kernels_by_gradient_saliency(
     all_saliency = jnp.concatenate(saliency_values)
 
     # Determine threshold for target sparsity
+    # We want to prune the bottom k% of ALL weights.
+    # The weights that were already 0 (saliency -1.0) will be at the very bottom
+    # of the sorted list, so they will be "re-pruned" automatically.
     k = int(len(all_saliency) * target_sparsity)
-    threshold = jnp.sort(all_saliency)[k]
+
+    if k > 0:
+        threshold = jnp.sort(all_saliency)[k]
+    else:
+        threshold = -2.0  # Prune nothing
 
     print(f"  > Global {method.capitalize()} Saliency Threshold: {threshold:.6e}")
 
     # Create mask based on saliency using tree structure
     flat_masks = []
-    for (path, param), (_, grad) in zip(flat_params_with_path, flat_grads_with_path):
+
+    # We re-iterate to apply the threshold
+    for (path, param), (_, grad), prev_m_leaf in zip(
+        flat_params_with_path, flat_grads_with_path, flat_prev_mask
+    ):
         is_kernel = any(
             isinstance(node, jax.tree_util.DictKey) and node.key == "kernel"
             for node in path
         )
 
         if is_kernel:
-            # Compute saliency and prune
+            # Re-compute saliency to apply threshold
             if method == "taylor":
                 saliency = jnp.abs(param * grad)
             elif method == "gradient":
@@ -94,6 +126,11 @@ def prune_kernels_by_gradient_saliency(
             elif method == "magnitude":
                 saliency = jnp.abs(param)
 
+            # Apply Iterative Logic locally as well for consistency
+            if prev_m_leaf is not None:
+                saliency = jnp.where(prev_m_leaf == 0, -1.0, saliency)
+
+            # Strict inequality (> threshold) ensures we kill the -1.0s
             mask_leaf = (saliency > threshold).astype(jnp.float32)
         else:
             # Keep biases intact
@@ -112,20 +149,14 @@ def compute_gradients_from_batch(
 ) -> tuple[Params, Params]:
     """
     Compute gradients for actor and critic from a single batch.
-
-    This is useful for computing saliency when gradients weren't saved during training.
-
     Args:
         agent: SACAgent with trained parameters
         batch: Batch of replay buffer data
         normalize_obs: Whether to normalize observations
-
     Returns:
         (actor_gradients, critic_gradients) tuple
     """
-    from functools import partial
-
-    from src.agents.sac import _sac_train_step
+    from src.networks.actor import sample_action
 
     # Normalize observations if needed
     if normalize_obs:
@@ -142,8 +173,6 @@ def compute_gradients_from_batch(
     # Create gradient computation functions
     def actor_loss_fn(actor_params):
         """Compute actor loss for gradient calculation."""
-        from src.networks.actor import sample_action
-
         # Get mean and log_std from actor
         mean, log_std = agent.state.actor_apply_fn(actor_params, batch.obs)
 
@@ -165,13 +194,11 @@ def compute_gradients_from_batch(
 
     def critic_loss_fn(critic_params):
         """Compute critic loss for gradient calculation."""
-
         # Compute current Q-values
         q1, q2 = agent.state.critic_apply_fn(critic_params, batch.obs, batch.actions)
 
         # Compute target Q-values (using target params)
         key = jax.random.PRNGKey(0)
-        from src.networks.actor import sample_action
 
         # Get next action from actor
         next_mean, next_log_std = agent.state.actor_apply_fn(
@@ -211,19 +238,6 @@ def accumulate_gradient_statistics(
 ) -> tuple[Params, Params]:
     """
     Accumulate gradient statistics over multiple batches.
-
-    This provides more stable saliency estimates by averaging gradients
-    across multiple mini-batches.
-
-    Args:
-        agent: SACAgent with trained parameters
-        replay_buffer: ReplayBuffer to sample from
-        num_batches: Number of batches to average over
-        batch_size: Size of each batch
-        normalize_obs: Whether to normalize observations
-
-    Returns:
-        (accumulated_actor_grads, accumulated_critic_grads) - averaged over batches
     """
     print(f"  > Accumulating gradients over {num_batches} batches...")
 

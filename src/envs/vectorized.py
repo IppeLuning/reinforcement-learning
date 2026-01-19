@@ -114,7 +114,7 @@ def make_vectorized_metaworld_env(
     # Each env needs a unique seed for diversity
     env_fns = [
         lambda i=i: make_metaworld_env(
-            task_name, max_episode_steps, scale_factor, seed=base_seed + i
+            task_name, max_episode_steps - 1, scale_factor, seed=base_seed + i
         )[
             0
         ]  # [0] to get just the env, not the metadata
@@ -126,7 +126,7 @@ def make_vectorized_metaworld_env(
 
     # Get environment metadata from the first environment
     single_env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
-        task_name, max_episode_steps, scale_factor, seed=base_seed
+        task_name, max_episode_steps - 1, scale_factor, seed=base_seed
     )
     single_env.close()
 

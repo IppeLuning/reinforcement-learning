@@ -6,4 +6,4 @@ checkpoints/
 uv.lock
 results_test/
 masks/
-
+experiments/

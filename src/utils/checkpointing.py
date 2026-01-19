@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from src.training.train_state import MaskedTrainState, SACTrainState
+from src.training.train_state import SACTrainState
 
 
 def _params_to_numpy(params: Any) -> Any:
@@ -51,16 +51,18 @@ class Checkpointer:
             "log_alpha": np.array(state.log_alpha),
         }
 
-        # [CRITICAL FIX] Save masks if they exist (for resuming sparse runs)
-        if isinstance(state, MaskedTrainState):
-            if state.actor_mask is not None:
-                checkpoint_data["actor_mask"] = _params_to_numpy(state.actor_mask)
-            if state.critic_mask is not None:
-                checkpoint_data["critic_mask"] = _params_to_numpy(state.critic_mask)
+        # [UPDATED] Check masks directly on SACTrainState
+        if state.actor_mask is not None:
+            checkpoint_data["actor_mask"] = _params_to_numpy(state.actor_mask)
+
+        if state.critic_mask is not None:
+            checkpoint_data["critic_mask"] = _params_to_numpy(state.critic_mask)
 
         # Determine path
-        if filename:
-            path = os.path.join(self.checkpoint_dir, f"{filename}.pkl")
+        if filename is None:
+            filename = f"checkpoint_{state.step}"
+
+        path = os.path.join(self.checkpoint_dir, f"{filename}.pkl")
 
         with open(path, "wb") as f:
             pickle.dump(checkpoint_data, f)
@@ -72,7 +74,7 @@ class Checkpointer:
     def restore(
         self,
         template_state: SACTrainState,
-        item: Optional[str] = None,  # <--- Added to support 'checkpoint_init'
+        item: Optional[str] = None,
     ) -> Optional[SACTrainState]:
         """Restore training state from checkpoint.
 
@@ -86,10 +88,12 @@ class Checkpointer:
         # Determine path
         if item:
             # Handles "checkpoint_init" or "checkpoint_best"
-            # We append .pkl if user didn't provided it
             if not item.endswith(".pkl"):
                 item += ".pkl"
             path = os.path.join(self.checkpoint_dir, item)
+        else:
+            # Fallback or specific logic if needed
+            return None
 
         if not os.path.exists(path):
             return None
@@ -98,6 +102,7 @@ class Checkpointer:
             checkpoint_data = pickle.load(f)
 
         # Reconstruct state
+        # Note: We rely on template_state for optimizers/apply_fns which aren't saved
         restored_state = template_state.replace(
             step=checkpoint_data["step"],
             actor_params=_numpy_to_params(checkpoint_data["actor_params"]),
@@ -108,13 +113,17 @@ class Checkpointer:
             log_alpha=jnp.array(checkpoint_data["log_alpha"]),
         )
 
-        # [CRITICAL FIX] Restore masks if present in checkpoint
-        # This allows resuming a sparse run seamlessly
-        if isinstance(template_state, MaskedTrainState):
-            if "actor_mask" in checkpoint_data:
-                restored_state = restored_state.replace(
-                    actor_mask=_numpy_to_params(checkpoint_data["actor_mask"]),
-                    critic_mask=_numpy_to_params(checkpoint_data["critic_mask"]),
-                )
+        # [UPDATED] Restore masks if present in checkpoint
+        # This allows seamless resuming of sparse runs
+        if "actor_mask" in checkpoint_data:
+            print(f"    Restoring masks from checkpoint...")
+            restored_state = restored_state.replace(
+                actor_mask=_numpy_to_params(checkpoint_data["actor_mask"]),
+                critic_mask=_numpy_to_params(checkpoint_data.get("critic_mask")),
+            )
+        else:
+            # If loading a dense checkpoint into a potentially sparse pipeline,
+            # ensure we reset masks to None (or keep template's None)
+            restored_state = restored_state.replace(actor_mask=None, critic_mask=None)
 
         return restored_state
