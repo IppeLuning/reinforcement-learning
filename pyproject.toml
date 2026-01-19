@@ -23,6 +23,7 @@ dependencies = [
     "pytest>=9.0.2",
     "matplotlib>=3.8.0",
     "seaborn>=0.13.0",
+    "ipykernel>=7.1.0",
 ]
 
 [tool.setuptools.packages.find]

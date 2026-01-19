@@ -1,14 +1,14 @@
 environments:
   tasks: 
-    - "reach-v3"
-    # - "push-v3" 
+    # - "reach-v3"
+    - "push-v3" 
     # - "pick-place-v3"
-  seeds: [1002] # 5 seeds
+  seeds: [1000] # 5 seeds
   
   # Parallelization settings for faster data collection
   parallel:
     enabled: true           # Set to true to use vectorized environments
-    num_envs: 2            # M3 Mac: 8 is optimal (matches performance cores)
+    num_envs: 1        # M3 Mac: 8 is optimal (matches performance cores)
     strategy: "sync"        # M3 Mac: 'sync' is MUCH faster than 'async'
     
     # M3 Mac Optimization:
@@ -18,7 +18,7 @@ environments:
   
 
 hyperparameters:
-  total_steps: 150000
+  total_steps: 500000
   start_steps: 10000
   max_episode_steps: 400
   batch_size: 2048  # Large batch for better GPU utilization + fewer update calls
@@ -42,6 +42,7 @@ hyperparameters:
     alpha_lr: 0.00005
     init_alpha: 0.2  
     auto_alpha: True
+    scale_rewards: 1
 
     target_mean_success: 0.8 
     patience: 3            
@@ -54,7 +55,7 @@ hyperparameters:
          # Lower alpha LR = slower alpha decay
 
     push-v3:
-      scale_rewards: 1
+      scale_rewards: 10
     pick-place-v3:
       init_alpha: 1.0
       target_mean_success: 0.8
