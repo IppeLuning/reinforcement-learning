@@ -169,7 +169,7 @@ def create_objective(task: str, tuning_steps: int = 100_000, num_envs: int = 8):
 
             # Pruning checkpoint - use IQM return for pruning (has signal when success=0)
             if total_env_steps % eval_interval < num_envs:
-                eval_metrics = evaluate_with_returns(eval_env, agent, num_episodes=5)
+                eval_metrics = evaluate_with_returns(eval_env, agent, num_episodes=10)
                 iqm_return = eval_metrics["iqm_return"]
                 mean_success = eval_metrics["mean_success"]
                 print(f"  [Eval] Trial {trial.number} | Step {total_env_steps} | Success: {mean_success:.0%} | IQM Return: {iqm_return:.1f}", flush=True)
@@ -183,6 +183,7 @@ def create_objective(task: str, tuning_steps: int = 100_000, num_envs: int = 8):
                     raise optuna.TrialPruned()
 
         # Final evaluation - return SUCCESS RATE as the true objective
+        # Use IQM return as tie-breaker when success=0 (allows comparison of trials that haven't succeeded yet)
         eval_metrics = evaluate_with_returns(eval_env, agent, num_episodes=10)
         vec_env.close()
         eval_env.close()
@@ -190,7 +191,12 @@ def create_objective(task: str, tuning_steps: int = 100_000, num_envs: int = 8):
         final_success = eval_metrics["mean_success"]
         final_iqm = eval_metrics["iqm_return"]
         print(f"  Trial {trial.number} COMPLETE | Success: {final_success:.0%} | IQM Return: {final_iqm:.1f}", flush=True)
-        return final_success  # Success rate is the true objective
+        
+        # Return composite: success rate (primary), IQM return as tie-breaker when success=0
+        # Scale IQM to [0, 0.01) so it only affects trials with same success rate
+        # Normalize: IQM 2000 -> 0.01, so IQM difference matters but <0.01 doesn't interfere with success rates
+        normalized_iqm = (final_iqm / 200_000) if final_iqm > 0 else 0.0
+        return final_success + normalized_iqm
 
     return objective
 
