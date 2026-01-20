@@ -3,7 +3,7 @@ environments:
     # - "reach-v3"
     - "push-v3" 
     # - "pick-place-v3"
-  seeds: [3000] # 5 seeds
+  seeds: [5000] # 5 seeds
   
   # Parallelization settings for faster data collection
   parallel:
