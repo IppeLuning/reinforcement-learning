@@ -124,29 +124,34 @@ def train_mask(
         # Use defaults if sparsity metadata isn't present
         sparsity = mask_data.get("sparsity_target", 0.0)
 
-    # 5. REWINDING: Load the specific checkpoint (Winning Ticket Initialization)
-    if not os.path.exists(rewind_ckpt_path):
-        raise FileNotFoundError(f"Rewind checkpoint not found at: {rewind_ckpt_path}")
-
-    print(f"    Rewinding weights to anchor: {rewind_ckpt_path}")
-
-    # We use the Checkpointer to load the state, but we point it to the directory
-    # containing the rewind file.
+    # 5. REWINDING
     rewind_dir = os.path.dirname(rewind_ckpt_path)
     rewind_filename = os.path.basename(rewind_ckpt_path)
-
-    # Initialize a temporary checkpointer just for loading
     loader = Checkpointer(rewind_dir)
-    restored_state = loader.restore(agent.state, item=rewind_filename)
 
-    if restored_state is None:
+    # Load the dense state into a temporary variable
+    dense_state = loader.restore(agent.state, item=rewind_filename)
+
+    if dense_state is None:
         raise ValueError(f"Failed to restore rewind checkpoint from {rewind_ckpt_path}")
 
-    agent.state = restored_state
+    print(f"    Rewinding weights to anchor...")
+
+    # [FIX] Manually copy each parameter group.
+    # Since SACTrainState doesn't have a single 'params' bucket, we copy specific fields.
+    agent.state = agent.state.replace(
+        actor_params=dense_state.actor_params,
+        critic_params=dense_state.critic_params,
+        target_critic_params=dense_state.target_critic_params,
+        log_alpha=dense_state.log_alpha,
+        # OPTIONAL: If you want to rewind the Optimizer Momentum too (Standard LTH behavior),
+        # uncomment these lines. If you want a "fresh" optimizer start, leave them commented.
+        # actor_opt_state=dense_state.actor_opt_state,
+        # critic_opt_state=dense_state.critic_opt_state,
+        # alpha_opt_state=dense_state.alpha_opt_state,
+    )
 
     # 6. APPLY MASK
-    # Now that weights are reset to T=k, we must zero out the pruned weights.
-    # Because use_masking=True, this also registers them as non-trainable.
     print(f"    Applying mask (Sparsity ~{sparsity:.0%})...")
     agent.apply_mask(actor_mask, critic_mask)
 
