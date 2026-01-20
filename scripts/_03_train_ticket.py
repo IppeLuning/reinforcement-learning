@@ -33,6 +33,7 @@ def train_mask(
     mask_path: str,
     save_dir: str,
     rewind_ckpt_path: str,  # <--- CRITICAL UPDATE: Explicit path to rewind weights
+    resume_checkpoint: str = None,  # <--- NEW: Path to checkpoint to resume from
 ) -> None:
     """
     Executes Step 3 of the LTH pipeline (The Retraining/Ticket Run).
@@ -44,6 +45,7 @@ def train_mask(
         mask_path: Path to the .pkl file containing actor/critic masks.
         save_dir: Where to save the results of this training run.
         rewind_ckpt_path: Path to the checkpoint to rewind to (e.g., 'round_0/checkpoint_rewind.pkl').
+        resume_checkpoint: Optional path to checkpoint to resume training from.
     """
 
     # Check completion
@@ -124,31 +126,56 @@ def train_mask(
         # Use defaults if sparsity metadata isn't present
         sparsity = mask_data.get("sparsity_target", 0.0)
 
-    # 5. REWINDING: Load the specific checkpoint (Winning Ticket Initialization)
-    if not os.path.exists(rewind_ckpt_path):
-        raise FileNotFoundError(f"Rewind checkpoint not found at: {rewind_ckpt_path}")
+    # Track resume step for training loop
+    resume_from_step = 0
 
-    print(f"    Rewinding weights to anchor: {rewind_ckpt_path}")
+    # 5. CHECKPOINT LOADING: Either resume or rewind
+    if resume_checkpoint and os.path.exists(resume_checkpoint):
+        # RESUME MODE: Load from checkpoint to continue training
+        print(f"    RESUMING from checkpoint: {resume_checkpoint}")
+        
+        resume_dir = os.path.dirname(resume_checkpoint)
+        resume_filename = os.path.basename(resume_checkpoint)
+        
+        loader = Checkpointer(resume_dir)
+        restored_state = loader.restore(agent.state, item=resume_filename)
+        
+        if restored_state is None:
+            raise ValueError(f"Failed to restore resume checkpoint from {resume_checkpoint}")
+        
+        agent.state = restored_state
+        resume_from_step = int(agent.state.step)
+        print(f"    Resumed at step {resume_from_step}")
+        
+        # Mask should already be in the checkpoint, but we re-apply to be safe
+        print(f"    Re-applying mask (Sparsity ~{sparsity:.0%})...")
+        agent.apply_mask(actor_mask, critic_mask)
+    else:
+        # REWIND MODE: Start fresh from rewind weights (normal LTH)
+        if not os.path.exists(rewind_ckpt_path):
+            raise FileNotFoundError(f"Rewind checkpoint not found at: {rewind_ckpt_path}")
 
-    # We use the Checkpointer to load the state, but we point it to the directory
-    # containing the rewind file.
-    rewind_dir = os.path.dirname(rewind_ckpt_path)
-    rewind_filename = os.path.basename(rewind_ckpt_path)
+        print(f"    Rewinding weights to anchor: {rewind_ckpt_path}")
 
-    # Initialize a temporary checkpointer just for loading
-    loader = Checkpointer(rewind_dir)
-    restored_state = loader.restore(agent.state, item=rewind_filename)
+        # We use the Checkpointer to load the state, but we point it to the directory
+        # containing the rewind file.
+        rewind_dir = os.path.dirname(rewind_ckpt_path)
+        rewind_filename = os.path.basename(rewind_ckpt_path)
 
-    if restored_state is None:
-        raise ValueError(f"Failed to restore rewind checkpoint from {rewind_ckpt_path}")
+        # Initialize a temporary checkpointer just for loading
+        loader = Checkpointer(rewind_dir)
+        restored_state = loader.restore(agent.state, item=rewind_filename)
 
-    agent.state = restored_state
+        if restored_state is None:
+            raise ValueError(f"Failed to restore rewind checkpoint from {rewind_ckpt_path}")
 
-    # 6. APPLY MASK
-    # Now that weights are reset to T=k, we must zero out the pruned weights.
-    # Because use_masking=True, this also registers them as non-trainable.
-    print(f"    Applying mask (Sparsity ~{sparsity:.0%})...")
-    agent.apply_mask(actor_mask, critic_mask)
+        agent.state = restored_state
+
+        # 6. APPLY MASK
+        # Now that weights are reset to T=k, we must zero out the pruned weights.
+        # Because use_masking=True, this also registers them as non-trainable.
+        print(f"    Applying mask (Sparsity ~{sparsity:.0%})...")
+        agent.apply_mask(actor_mask, critic_mask)
 
     # 7. Infrastructure
     buffer = ReplayBuffer(
@@ -182,6 +209,7 @@ def train_mask(
             checkpointer=ticket_checkpointer,
             rewind_steps=0,  # <--- Do not save rewind anchor in ticket runs
             max_episode_steps=hp["max_episode_steps"],
+            resume_from_step=resume_from_step,  # <--- Pass resume step
         )
     else:
         stats = run_training_loop(
@@ -200,6 +228,7 @@ def train_mask(
             updates_per_step=1,
             checkpointer=ticket_checkpointer,
             rewind_steps=0,  # <--- Do not save rewind anchor in ticket runs
+            resume_from_step=resume_from_step,  # <--- Pass resume step
         )
 
     print(f"  > Saving replay buffer (required for next pruning round)...")
@@ -212,6 +241,189 @@ def train_mask(
     env.close()
 
     # Save Results
+    with open(os.path.join(save_dir, "training_stats.json"), "w") as f:
+        serializable_stats = {k: v for k, v in stats.items() if k != "metrics_history"}
+        json.dump(serializable_stats, f, indent=2)
+
+    print(f"  > Ticket training complete. Best success: {stats['best_success']:.2%}")
+
+
+def train_mask_with_buffer(
+    cfg: Dict[str, Any],
+    task_name: str,
+    seed: int,
+    mask_path: str,
+    save_dir: str,
+    rewind_ckpt_path: str,
+    resume_checkpoint: str = None,
+    replay_buffer_path: str = None,
+) -> None:
+    """
+    Train with resume support AND pre-filled replay buffer.
+    
+    This is specifically for resuming interrupted training runs where we want
+    to pre-fill the replay buffer so training can continue immediately.
+    """
+    
+    if not os.path.exists(mask_path):
+        raise FileNotFoundError(f"Mask file not found: {mask_path}")
+
+    print(f"  > Starting Ticket Training (Resume with Buffer)...")
+
+    # 1. Setup Configuration
+    hp = cfg["hyperparameters"]
+    defaults = hp["defaults"]
+    task_overrides = hp.get("tasks", {}).get(task_name, {})
+    params = {**defaults, **task_overrides}
+
+    hidden_dims = tuple(hp["hidden_dims"])
+
+    parallel_config = cfg["environments"].get("parallel", {})
+    use_parallel = parallel_config.get("enabled", False)
+    num_envs = parallel_config.get("num_envs", 8)
+    strategy = parallel_config.get("strategy", "sync")
+
+    # 2. Initialize Environment & Seeding
+    set_seed(seed)
+
+    if use_parallel:
+        print(f"    Creating {num_envs} parallel environments ({strategy} mode)...")
+        env, obs_dim, act_dim, act_low, act_high = make_vectorized_metaworld_env(
+            task_name=task_name,
+            max_episode_steps=hp["max_episode_steps"],
+            scale_factor=params["scale_rewards"],
+            num_envs=num_envs,
+            strategy=strategy,
+            base_seed=seed,
+        )
+    else:
+        env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
+            task_name, hp["max_episode_steps"], params["scale_rewards"], seed
+        )
+        num_envs = 1
+
+    # 3. Initialize Agent
+    sac_config = SACConfig(
+        gamma=params.get("gamma", 0.99),
+        tau=params.get("tau", 0.005),
+        actor_lr=params.get("actor_lr", 3e-4),
+        critic_lr=params.get("critic_lr", 3e-4),
+        alpha_lr=params.get("alpha_lr", 3e-4),
+        target_entropy_scale=params.get("target_entropy_scale", 1.0),
+        auto_alpha=params.get("auto_alpha", True),
+        init_alpha=params.get("init_alpha", 0.2),
+        hidden_dims=hidden_dims,
+        use_masking=True,
+    )
+
+    agent = SACAgent(
+        obs_dim=obs_dim,
+        act_dim=act_dim,
+        act_low=act_low,
+        act_high=act_high,
+        config=sac_config,
+        seed=seed,
+    )
+
+    # 4. Load the Masks
+    print(f"    Loading mask from: {mask_path}")
+    with open(mask_path, "rb") as f:
+        mask_data = pickle.load(f)
+        actor_mask = mask_data["actor"]
+        critic_mask = mask_data["critic"]
+        sparsity = mask_data.get("sparsity_target", 0.0)
+
+    # 5. Load checkpoint
+    resume_from_step = 0
+    if resume_checkpoint and os.path.exists(resume_checkpoint):
+        print(f"    RESUMING from checkpoint: {resume_checkpoint}")
+        
+        resume_dir = os.path.dirname(resume_checkpoint)
+        resume_filename = os.path.basename(resume_checkpoint)
+        
+        loader = Checkpointer(resume_dir)
+        restored_state = loader.restore(agent.state, item=resume_filename)
+        
+        if restored_state is None:
+            raise ValueError(f"Failed to restore checkpoint from {resume_checkpoint}")
+        
+        agent.state = restored_state
+        resume_from_step = int(agent.state.step)
+        print(f"    Resumed at step {resume_from_step}")
+        
+        print(f"    Re-applying mask (Sparsity ~{sparsity:.0%})...")
+        agent.apply_mask(actor_mask, critic_mask)
+    else:
+        raise ValueError("train_mask_with_buffer requires a resume_checkpoint")
+
+    # 6. Create and PRE-FILL replay buffer
+    buffer = ReplayBuffer(
+        obs_dim, act_dim, max_size=hp.get("replay_buffer_size", 1_000_000)
+    )
+    
+    if replay_buffer_path and os.path.exists(replay_buffer_path):
+        print(f"    Loading replay buffer from: {replay_buffer_path}")
+        with open(replay_buffer_path, "rb") as f:
+            buffer_data = pickle.load(f)
+        buffer.load(buffer_data)
+        print(f"    Replay buffer pre-filled with {buffer.size} samples")
+    else:
+        print(f"    WARNING: No replay buffer to load, starting with empty buffer")
+
+    ticket_checkpointer = Checkpointer(save_dir)
+
+    # 7. Run Training
+    if use_parallel:
+        stats = run_vectorized_training_loop(
+            vec_env=env,
+            agent=agent,
+            replay_buffer=buffer,
+            total_steps=hp["total_steps"],
+            start_steps=hp["start_steps"],
+            batch_size=hp["batch_size"],
+            eval_interval=hp["eval_interval"],
+            save_dir=save_dir,
+            seed=seed,
+            task_name=task_name,
+            num_envs=num_envs,
+            scale_factor=params.get("scale_rewards", 1),
+            target_mean_success=params.get("target_mean_success", None),
+            patience=params.get("patience", 20),
+            updates_per_step=params.get("updates_per_step", 1),
+            eval_episodes=hp.get("eval_episodes", 5),
+            checkpointer=ticket_checkpointer,
+            rewind_steps=0,
+            max_episode_steps=hp["max_episode_steps"],
+            resume_from_step=resume_from_step,
+        )
+    else:
+        stats = run_training_loop(
+            env=env,
+            agent=agent,
+            replay_buffer=buffer,
+            total_steps=hp["total_steps"],
+            start_steps=hp["start_steps"],
+            batch_size=hp["batch_size"],
+            eval_interval=hp["eval_interval"],
+            save_dir=save_dir,
+            seed=seed,
+            task_name=task_name,
+            target_mean_success=params.get("target_mean_success", None),
+            patience=params.get("patience", 20),
+            updates_per_step=1,
+            checkpointer=ticket_checkpointer,
+            rewind_steps=0,
+            resume_from_step=resume_from_step,
+        )
+
+    # 8. Save buffer and cleanup
+    print(f"  > Saving replay buffer...")
+    buffer_data = buffer.save()
+    with open(os.path.join(save_dir, "replay_buffer.pkl"), "wb") as f:
+        pickle.dump(buffer_data, f)
+
+    env.close()
+
     with open(os.path.join(save_dir, "training_stats.json"), "w") as f:
         serializable_stats = {k: v for k, v in stats.items() if k != "metrics_history"}
         json.dump(serializable_stats, f, indent=2)

@@ -64,6 +64,7 @@ def run_vectorized_training_loop(
     checkpointer: Optional[Checkpointer] = None,
     rewind_steps: int = 0,
     max_episode_steps: int = 500,
+    resume_from_step: int = 0,
 ) -> Dict[str, Any]:
     """
     Training loop optimized for vectorized environments.
@@ -75,6 +76,9 @@ def run_vectorized_training_loop(
     - Steps `num_envs` environments simultaneously
     - Tracks multiple episodes at once
     - Effective sample collection rate is `num_envs * steps_per_second`
+    
+    Args:
+        resume_from_step: If > 0, resume training from this step (checkpoint already loaded).
     """
     start_time = time.time()
 
@@ -83,11 +87,14 @@ def run_vectorized_training_loop(
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
     episodes_path = os.path.join(save_dir, "train_episodes.jsonl")
 
-    # Wipe files if they exist (start fresh)
-    if os.path.exists(metrics_path):
-        os.remove(metrics_path)
-    if os.path.exists(episodes_path):
-        os.remove(episodes_path)
+    # Only wipe files if starting fresh (not resuming)
+    if resume_from_step == 0:
+        if os.path.exists(metrics_path):
+            os.remove(metrics_path)
+        if os.path.exists(episodes_path):
+            os.remove(episodes_path)
+    else:
+        print(f"{Color.BLUE}>> Resuming training from step {resume_from_step}{Color.END}")
 
     # Reset all environments
     obs, _ = vec_env.reset(seed=seed)
@@ -115,9 +122,10 @@ def run_vectorized_training_loop(
     train_metrics_buffer = defaultdict(list)
 
     # Total environment steps (across all parallel envs)
-    total_env_steps = num_envs
+    # If resuming, start from the checkpoint step
+    total_env_steps = resume_from_step + num_envs if resume_from_step > 0 else num_envs
     step = 0
-    rewind_saved = False
+    rewind_saved = resume_from_step >= rewind_steps if rewind_steps > 0 else False
 
     print(f"{Color.BLUE}>> Training with {num_envs} parallel environments{Color.END}")
 
@@ -188,7 +196,8 @@ def run_vectorized_training_loop(
             print(
                 f"{Color.BLUE}>> Saving Rewind Weights (Step {total_env_steps})...{Color.END}"
             )
-            checkpointer.save(agent.state, filename="checkpoint_rewind")
+            # Don't save optimizer state for rewind - we want fresh optimizers when rewinding
+            checkpointer.save(agent.state, filename="checkpoint_rewind", save_optimizer=False)
             rewind_saved = True
 
         # 4. Handle episode endings
@@ -351,8 +360,13 @@ def run_training_loop(
     eval_episodes: int = 5,
     checkpointer: Optional[Checkpointer] = None,
     rewind_steps: int = 0,
+    resume_from_step: int = 0,
 ) -> Dict[str, Any]:
-    """Core training loop for SAC agent with LTH support (single environment)."""
+    """Core training loop for SAC agent with LTH support (single environment).
+    
+    Args:
+        resume_from_step: If > 0, resume training from this step (checkpoint already loaded).
+    """
     start_time = time.time()
 
     # 0. Setup Logging Files
@@ -360,11 +374,14 @@ def run_training_loop(
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
     episodes_path = os.path.join(save_dir, "train_episodes.jsonl")
 
-    # Wipe files if they exist
-    if os.path.exists(metrics_path):
-        os.remove(metrics_path)
-    if os.path.exists(episodes_path):
-        os.remove(episodes_path)
+    # Only wipe files if starting fresh (not resuming)
+    if resume_from_step == 0:
+        if os.path.exists(metrics_path):
+            os.remove(metrics_path)
+        if os.path.exists(episodes_path):
+            os.remove(episodes_path)
+    else:
+        print(f"{Color.BLUE}>> Resuming training from step {resume_from_step}{Color.END}")
 
     # Reset environment
     obs, _ = env.reset(seed=seed)
@@ -392,11 +409,13 @@ def run_training_loop(
     train_metrics_buffer = defaultdict(list)
 
     step = 0
+    start_step = resume_from_step + 1 if resume_from_step > 0 else 1
 
-    for step in range(1, total_steps + 1):
+    for step in range(start_step, total_steps + 1):
         if rewind_steps > 0 and step == rewind_steps:
             print(f"{Color.BLUE}>> Saving Rewind Weights (Step {step})...{Color.END}")
-            checkpointer.save(agent.state, filename="checkpoint_rewind")
+            # Don't save optimizer state for rewind - we want fresh optimizers when rewinding
+            checkpointer.save(agent.state, filename="checkpoint_rewind", save_optimizer=False)
         # 1. Action Selection
         if step < start_steps:
             action = env.action_space.sample()

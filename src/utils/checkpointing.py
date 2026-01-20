@@ -40,8 +40,16 @@ class Checkpointer:
         self,
         state: SACTrainState,
         filename: Optional[str] = None,
+        save_optimizer: bool = True,
     ) -> str:
-        """Save training state to checkpoint."""
+        """Save training state to checkpoint.
+        
+        Args:
+            state: The SACTrainState to save.
+            filename: Optional filename (without .pkl extension).
+            save_optimizer: Whether to save optimizer states for exact resumption.
+                           Set to False for rewind checkpoints where we want fresh optimizers.
+        """
 
         checkpoint_data = {
             "step": int(state.step),
@@ -51,7 +59,13 @@ class Checkpointer:
             "log_alpha": np.array(state.log_alpha),
         }
 
-        # [UPDATED] Check masks directly on SACTrainState
+        # Save optimizer states for reproducible resumption
+        if save_optimizer:
+            checkpoint_data["actor_opt_state"] = _params_to_numpy(state.actor_opt_state)
+            checkpoint_data["critic_opt_state"] = _params_to_numpy(state.critic_opt_state)
+            checkpoint_data["alpha_opt_state"] = _params_to_numpy(state.alpha_opt_state)
+
+        # Save masks if present
         if state.actor_mask is not None:
             checkpoint_data["actor_mask"] = _params_to_numpy(state.actor_mask)
 
@@ -102,7 +116,6 @@ class Checkpointer:
             checkpoint_data = pickle.load(f)
 
         # Reconstruct state
-        # Note: We rely on template_state for optimizers/apply_fns which aren't saved
         restored_state = template_state.replace(
             step=checkpoint_data["step"],
             actor_params=_numpy_to_params(checkpoint_data["actor_params"]),
@@ -113,8 +126,18 @@ class Checkpointer:
             log_alpha=jnp.array(checkpoint_data["log_alpha"]),
         )
 
-        # [UPDATED] Restore masks if present in checkpoint
-        # This allows seamless resuming of sparse runs
+        # Restore optimizer states if present (for exact resumption)
+        if "actor_opt_state" in checkpoint_data:
+            print(f"    Restoring optimizer states from checkpoint...")
+            restored_state = restored_state.replace(
+                actor_opt_state=_numpy_to_params(checkpoint_data["actor_opt_state"]),
+                critic_opt_state=_numpy_to_params(checkpoint_data["critic_opt_state"]),
+                alpha_opt_state=_numpy_to_params(checkpoint_data["alpha_opt_state"]),
+            )
+        else:
+            print(f"    Note: Optimizer states not in checkpoint, using fresh optimizers")
+
+        # Restore masks if present in checkpoint
         if "actor_mask" in checkpoint_data:
             print(f"    Restoring masks from checkpoint...")
             restored_state = restored_state.replace(
