@@ -1,7 +1,7 @@
 environments:
   tasks: 
-    - "reach-v3"
-    # - "push-v3" 
+    # - "reach-v3"
+    - "push-v3" 
     # - "pick-place-v3"
   seeds: [3000] # 5 seeds
   
@@ -18,7 +18,7 @@ environments:
   
 
 hyperparameters:
-  total_steps: 150000
+  total_steps: 500000
   start_steps: 10000
   max_episode_steps: 400
   batch_size: 2048  # Large batch for better GPU utilization + fewer update calls

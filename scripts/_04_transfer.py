@@ -133,12 +133,12 @@ def main():
     # === CONFIGURATION ===
     SOURCE_TASK = "reach-v3"
     TARGET_TASK = "push-v3"
-    SEED = 2000
+    SEED = 3000
     SOURCE_ROUND = 4
 
     # Comparison Flags
-    RUN_TICKET_TRANSFER = False  # Rewound Weights + Reach Mask
-    RUN_RANDOM_BASELINE = True  # Random Weights + Random Mask (80%)
+    RUN_TICKET_TRANSFER = True  # Rewound Weights + Reach Mask
+    RUN_RANDOM_BASELINE = False  # Random Weights + Random Mask (80%)
 
     RANDOM_SPARSITY = 0.8
     # =====================
