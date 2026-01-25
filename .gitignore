@@ -3,3 +3,11 @@ __pycache__/
 videos/
 checkpoints/
 .DS_Store
+uv.lock
+results_test/
+masks/
+experiments/
+notebooks/
+test.py
+
+notebook/

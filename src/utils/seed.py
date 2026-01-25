@@ -1,13 +1,32 @@
+import os
 import random
-from dataclasses import dataclass
 
+import jax
 import numpy as np
-import torch
 
 
-def set_seed(seed: int):
+def set_seed(seed: int = 42):
+    """
+    Sets seeds for Python and NumPy, and initializes the JAX key.
+
+    Args:
+        seed (int): The integer seed to use.
+
+    Returns:
+        jax.random.PRNGKey: The root random key for JAX operations.
+    """
+    # 1. Python random
     random.seed(seed)
+
+    # 2. NumPy
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
+    # 3. JAX (Stateless)
+    key = jax.random.key(seed)
+
+    # 4. OS Environment
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    print(f"Global seed set to: {seed}")
+
+    return key

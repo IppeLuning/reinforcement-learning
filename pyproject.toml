@@ -12,4 +12,30 @@ dependencies = [
     "packaging>=25.0",
     "pyaml>=25.7.0",
     "torch>=2.9.1",
+    # JAX ecosystem
+    "jax==0.5.0",
+    "flax>=0.10.0",
+    "optax>=0.2.4",
+    "orbax-checkpoint>=0.9.0",
+    # Apple Metal backend (macOS only)
+    "jaxlib==0.5.0; platform_system == 'Darwin'",
+    "jax-metal==0.1.1; platform_system == 'Darwin'",
+    "pytest>=9.0.2",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "ipykernel>=7.1.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[project.optional-dependencies]
+# Hábrók: standardize on CUDA 12 (>= 12.1 is common there)
+cuda = ["jax[cuda12]==0.5.0; platform_system == 'Linux'"]
+
+# Optional: if you prefer using the cluster's CUDA modules instead of pip CUDA wheels
+cuda-local = ["jax[cuda12-local]==0.5.0; platform_system == 'Linux'"]
