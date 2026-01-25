@@ -1,75 +1,71 @@
-"""
-Comparison Experiment Orchestrator.
-Compares "Ticket Transfer" (Learned Mask + Rewound Weights) against
-a "Random Baseline" (Random Mask + Random Weights).
-
-Usage:
-    python run_comparison.py
-"""
+from __future__ import annotations
 
 import os
 import pickle
+from typing import Any, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import yaml
 
-# Assuming train_mask is the sparse training loop
 from scripts._03_train_ticket import train_mask
-
-# Import pipeline components
 from src.agents import SACAgent, SACConfig
 from src.envs import make_metaworld_env
 from src.utils import set_seed
+from src.utils.types import Mask, PRNGKey
 
 
-def generate_random_mask(task, seed, sparsity, save_path, cfg):
-    """
-    Generates a random binary mask with specific sparsity (e.g., 0.8 = 80% zeros).
+def generate_random_mask(
+    task: str, seed: int, sparsity: float, save_path: str, cfg: Dict[str, Any]
+) -> None:
+    """Generates a random binary mask using a Bernoulli distribution.
+
+    Args:
+        task: Name of the Meta-World task to define network shapes.
+        seed: Random seed for reproducibility.
+        sparsity: Fraction of weights to set to zero (e.g., 0.8 = 80% sparse).
+        save_path: Path to save the generated mask pickle file.
+        cfg: Configuration dictionary containing architecture hyperparameters.
     """
     print(f"  [Gen] Generating {sparsity*100}% sparse random mask for {task}...")
 
-    hp = cfg["hyperparameters"]
+    hp: Dict[str, Any] = cfg["hyperparameters"]
     env, obs_dim, act_dim, _, _ = make_metaworld_env(
         task, hp["max_episode_steps"], hp["defaults"]["scale_rewards"], seed
     )
 
-    # Dummy agent to get shapes
     temp_config = SACConfig(hidden_dims=tuple(hp["hidden_dims"]))
     temp_agent = SACAgent(
         obs_dim, act_dim, np.zeros(act_dim), np.zeros(act_dim), temp_config, seed
     )
 
-    rng = jax.random.PRNGKey(seed)
+    rng: PRNGKey = jax.random.PRNGKey(seed)
 
-    def random_mask_leaf(leaf, key):
-        # Create mask: 1 with prob (1-sparsity), 0 with prob sparsity
-        # Using Bernoulli distribution
+    def random_mask_leaf(leaf: jax.Array, key: PRNGKey) -> jax.Array:
+        """Creates a binary mask leaf where 1 has probability (1 - sparsity)."""
         mask = jax.random.bernoulli(key, p=(1.0 - sparsity), shape=leaf.shape)
         return mask.astype(jnp.float32)
 
-    # Split keys for Actor
+    # Actor Mask Generation
     actor_leaves, actor_def = jax.tree_util.tree_flatten(temp_agent.state.actor_params)
     rng, *actor_keys = jax.random.split(rng, len(actor_leaves) + 1)
-
     actor_mask_leaves = [
         random_mask_leaf(leaf, key) for leaf, key in zip(actor_leaves, actor_keys)
     ]
-    actor_mask = jax.tree_util.tree_unflatten(actor_def, actor_mask_leaves)
+    actor_mask: Mask = jax.tree_util.tree_unflatten(actor_def, actor_mask_leaves)
 
-    # Split keys for Critic
+    # Critic Mask Generation
     critic_leaves, critic_def = jax.tree_util.tree_flatten(
         temp_agent.state.critic_params
     )
     rng, *critic_keys = jax.random.split(rng, len(critic_leaves) + 1)
-
     critic_mask_leaves = [
         random_mask_leaf(leaf, key) for leaf, key in zip(critic_leaves, critic_keys)
     ]
-    critic_mask = jax.tree_util.tree_unflatten(critic_def, critic_mask_leaves)
+    critic_mask: Mask = jax.tree_util.tree_unflatten(critic_def, critic_mask_leaves)
 
-    mask_data = {
+    mask_data: Dict[str, Any] = {
         "actor": actor_mask,
         "critic": critic_mask,
         "sparsity_target": sparsity,
@@ -85,43 +81,63 @@ def generate_random_mask(task, seed, sparsity, save_path, cfg):
     print(f"  [Save] Random mask saved to {save_path}")
 
 
-def adapt_and_save_mask(source_mask_path, target_mask_path, target_task, seed, cfg):
-    """Adapts source mask to target architecture (handling shape mismatches)"""
+def adapt_and_save_mask(
+    source_mask_path: str,
+    target_mask_path: str,
+    target_task: str,
+    seed: int,
+    cfg: Dict[str, Any],
+) -> None:
+    """Adapts a mask from a source task to a target architecture.
+
+    If a leaf shape mismatch is detected (e.g., due to different observation
+    dimensions), the function falls back to a dense (all ones) leaf for that
+    specific parameter to prevent crashes.
+
+    Args:
+        source_mask_path: Path to the existing source mask.
+        target_mask_path: Path to save the adapted mask.
+        target_task: Task name for the target architecture.
+        seed: Random seed.
+        cfg: Configuration dictionary.
+    """
     print(f"  [Adapt] Adapting mask from {source_mask_path}...")
 
     with open(source_mask_path, "rb") as f:
-        source_data = pickle.load(f)
+        source_data: Dict[str, Any] = pickle.load(f)
 
-    hp = cfg["hyperparameters"]
+    hp: Dict[str, Any] = cfg["hyperparameters"]
     env, obs_dim, act_dim, _, _ = make_metaworld_env(
         target_task, hp["max_episode_steps"], hp["defaults"]["scale_rewards"], seed
     )
 
-    # Dummy agent for target structure
     temp_config = SACConfig(hidden_dims=tuple(hp["hidden_dims"]))
     temp_agent = SACAgent(
         obs_dim, act_dim, np.zeros(act_dim), np.zeros(act_dim), temp_config, seed
     )
 
-    def adapt_leaf(source_leaf, target_shape):
+    def adapt_leaf(source_leaf: jax.Array, target_shape: Tuple[int, ...]) -> jax.Array:
         if source_leaf.shape != target_shape:
-            # Fallback to Dense (all ones) on mismatch
             return jnp.ones(target_shape)
         return source_leaf
 
-    # Adapt Actor
+    # Adapt Actor Mask
     src_flat, _ = jax.tree_util.tree_flatten(source_data["actor"])
     tgt_flat, tgt_def = jax.tree_util.tree_flatten(temp_agent.state.actor_params)
     new_actor = [adapt_leaf(s, t.shape) for s, t in zip(src_flat, tgt_flat)]
-    actor_mask = jax.tree_util.tree_unflatten(tgt_def, new_actor)
+    actor_mask: Mask = jax.tree_util.tree_unflatten(tgt_def, new_actor)
 
-    # Adapt Critic
+    # Adapt Critic Mask
     src_flat_c, _ = jax.tree_util.tree_flatten(source_data["critic"])
     tgt_flat_c, tgt_def_c = jax.tree_util.tree_flatten(temp_agent.state.critic_params)
     new_critic = [adapt_leaf(s, t.shape) for s, t in zip(src_flat_c, tgt_flat_c)]
-    critic_mask = jax.tree_util.tree_unflatten(tgt_def_c, new_critic)
+    critic_mask: Mask = jax.tree_util.tree_unflatten(tgt_def_c, new_critic)
 
-    mask_data = {"actor": actor_mask, "critic": critic_mask, "adapted_to": target_task}
+    mask_data: Dict[str, Any] = {
+        "actor": actor_mask,
+        "critic": critic_mask,
+        "adapted_to": target_task,
+    }
 
     os.makedirs(os.path.dirname(target_mask_path), exist_ok=True)
     with open(target_mask_path, "wb") as f:
@@ -129,64 +145,60 @@ def adapt_and_save_mask(source_mask_path, target_mask_path, target_task, seed, c
     env.close()
 
 
-def main():
-    # === CONFIGURATION ===
-    SOURCE_TASK = "reach-v3"
-    TARGET_TASK = "push-v3"
-    SEED = 3000
-    SOURCE_ROUND = 4
+def main() -> None:
+    """Main execution entry point for transfer and baseline experiments."""
+    SOURCE_TASK: str = "reach-v3"
+    TARGET_TASK: str = "push-v3"
+    SEED: int = 2000
+    SOURCE_ROUND: int = 4
 
-    # Comparison Flags
-    RUN_TICKET_TRANSFER = True  # Rewound Weights + Reach Mask
-    RUN_RANDOM_BASELINE = False  # Random Weights + Random Mask (80%)
-
-    RANDOM_SPARSITY = 0.8
-    # =====================
+    RUN_TICKET_TRANSFER: bool = True
+    RUN_RANDOM_BASELINE: bool = False
+    RANDOM_SPARSITY: float = 0.8
 
     with open("config.yaml", "r") as f:
-        cfg = yaml.safe_load(f)
+        cfg: Dict[str, Any] = yaml.safe_load(f)
 
     set_seed(SEED)
-    base_exp_dir = f"data/experiments/{TARGET_TASK}/seed_{SEED}"
+    base_exp_dir: str = f"data/experiments/{TARGET_TASK}/seed_{SEED}"
 
-    # 1. Prepare Weight Checkpoints (Without full dense training)
-    # ----------------------------------------------------------------
-    # Rewind weights: The state of the network at step k (used for Ticket Transfer)
-    rewind_steps = 20000
-    rewind_ckpt_path = os.path.join(base_exp_dir, "round_0", "checkpoint_rewind.pkl")
-
-    # Random Init weights: Pure initialization (Step 0) (used for Random Baseline)
-    random_init_path = os.path.join(base_exp_dir, "round_0", "checkpoint_init.pkl")
+    # 1. Prepare Weight Checkpoints
+    rewind_ckpt_path: str = os.path.join(
+        f"data/experiments/{SOURCE_TASK}/seed_{SEED}",
+        "round_0",
+        "checkpoint_rewind.pkl",
+    )
+    random_init_path: str = os.path.join(base_exp_dir, "round_0", "checkpoint_init.pkl")
 
     # 2. Experiment A: Ticket Transfer
-    # ----------------------------------------------------------------
     if RUN_TICKET_TRANSFER:
-        print(f"\n[Exp A] Running Ticket Transfer (Rewound Weights + Reach Mask)...")
+        print(
+            f"\n[Exp A] Running Ticket Transfer (Rewound Weights + {SOURCE_TASK} Mask)..."
+        )
 
-        # Paths
-        source_mask = (
+        source_mask_path = (
             f"data/experiments/{SOURCE_TASK}/seed_{SEED}/round_{SOURCE_ROUND}/mask.pkl"
         )
         exp_dir = os.path.join(base_exp_dir, "transfer_reach_mask")
-        target_mask = os.path.join(exp_dir, "mask_adapted.pkl")
+        target_mask_path = os.path.join(exp_dir, "mask_adapted.pkl")
 
-        if os.path.exists(source_mask):
-            adapt_and_save_mask(source_mask, target_mask, TARGET_TASK, SEED, cfg)
+        if os.path.exists(source_mask_path):
+            adapt_and_save_mask(
+                source_mask_path, target_mask_path, TARGET_TASK, SEED, cfg
+            )
 
-            # Train using REWOUND weights and ADAPTED mask
             train_mask(
                 cfg,
                 TARGET_TASK,
                 SEED,
-                mask_path=target_mask,
+                mask_path=target_mask_path,
                 save_dir=exp_dir,
                 rewind_ckpt_path=rewind_ckpt_path,
             )
         else:
-            print(f"Skipping Exp A: Source mask not found at {source_mask}")
+            print(f"Skipping Exp A: Source mask not found at {source_mask_path}")
 
     # 3. Experiment B: Random Baseline
-    # ----------------------------------------------------------------
     if RUN_RANDOM_BASELINE:
         print(f"\n[Exp B] Running Random Baseline (Random Weights + Random Mask)...")
 
@@ -195,11 +207,8 @@ def main():
         )
         random_mask_path = os.path.join(exp_dir, "mask_random.pkl")
 
-        # Generate Random Mask
         generate_random_mask(TARGET_TASK, SEED, RANDOM_SPARSITY, random_mask_path, cfg)
 
-        # Train using RANDOM INIT weights and RANDOM mask
-        # Note: We pass random_init_path to ensure we start from strictly seeded initialization
         train_mask(
             cfg,
             TARGET_TASK,

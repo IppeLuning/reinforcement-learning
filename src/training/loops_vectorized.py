@@ -1,13 +1,10 @@
-"""Training loops supporting both single and vectorized environments."""
-
 from __future__ import annotations
 
 import json
 import os
 import time
 from collections import defaultdict
-from encodings import hp_roman8
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -20,18 +17,25 @@ if TYPE_CHECKING:
 
 
 class Color:
-    """ANSI color codes for terminal output."""
+    """ANSI color codes for formatted terminal output."""
 
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    END = "\033[0m"
+    GREEN: str = "\033[92m"
+    RED: str = "\033[91m"
+    YELLOW: str = "\033[93m"
+    BLUE: str = "\033[94m"
+    END: str = "\033[0m"
 
 
-def append_to_jsonl(path: str, data: Dict[str, Any]):
-    """Helper to append a dictionary as a JSON line to a file."""
-    # Ensure values are serializable (convert numpy types to python native)
+def append_to_jsonl(path: str, data: Dict[str, Any]) -> None:
+    """Appends a dictionary as a single JSON line to a specified file.
+
+    Ensures that numeric types (like NumPy floats/ints) are converted to
+    native Python types for JSON serialization.
+
+    Args:
+        path: Path to the .jsonl file.
+        data: Dictionary of metrics to log.
+    """
     clean_data = {
         k: (
             float(v)
@@ -45,7 +49,7 @@ def append_to_jsonl(path: str, data: Dict[str, Any]):
 
 
 def run_vectorized_training_loop(
-    vec_env: Any,  # VectorizedMetaWorldEnv
+    vec_env: Any,
     agent: SACAgent,
     replay_buffer: ReplayBuffer,
     total_steps: int,
@@ -65,104 +69,99 @@ def run_vectorized_training_loop(
     rewind_steps: int = 0,
     max_episode_steps: int = 500,
 ) -> Dict[str, Any]:
-    """
-    Training loop optimized for vectorized environments.
+    """Executes a training loop optimized for vectorized environments.
 
-    Collects data from multiple environments in parallel, dramatically
-    speeding up the data collection phase of SAC training.
+    This loop collects data from multiple environments in parallel, which is
+    essential for speeding up the data collection bottleneck in SAC.
 
-    Key differences from single-env loop:
-    - Steps `num_envs` environments simultaneously
-    - Tracks multiple episodes at once
-    - Effective sample collection rate is `num_envs * steps_per_second`
+    Args:
+        vec_env: A vectorized environment (e.g., VectorizedMetaWorldEnv).
+        agent: The SAC agent instance.
+        replay_buffer: Buffer for storing transitions.
+        total_steps: Total environment steps to perform across all envs.
+        start_steps: Number of steps to collect with random actions initially.
+        batch_size: Size of training batches.
+        eval_interval: Step frequency for periodic evaluation.
+        save_dir: Directory to save metrics and checkpoints.
+        seed: Random seed for reproducibility.
+        task_name: Name of the Meta-World task.
+        num_envs: Number of parallel environments in the vectorized wrapper.
+        scale_factor: Reward scaling factor.
+        target_mean_success: Optional success rate threshold for early stopping.
+        patience: Number of evaluations to wait for improvement before stopping.
+        updates_per_step: Ratio of gradient updates per environment step.
+        eval_episodes: Number of episodes to run during evaluation.
+        checkpointer: Utility for saving/restoring model states.
+        rewind_steps: Global step at which to save "rewind" weights for LTH.
+        max_episode_steps: Maximum steps allowed per episode.
+
+    Returns:
+        A dictionary containing final training statistics and history.
     """
     start_time = time.time()
 
-    # Setup Logging Files
     os.makedirs(save_dir, exist_ok=True)
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
     episodes_path = os.path.join(save_dir, "train_episodes.jsonl")
 
-    # Wipe files if they exist (start fresh)
     if os.path.exists(metrics_path):
         os.remove(metrics_path)
     if os.path.exists(episodes_path):
         os.remove(episodes_path)
 
-    # Reset all environments
     obs, _ = vec_env.reset(seed=seed)
 
-    # Per-environment episode tracking
     episode_returns = np.zeros(num_envs)
     episode_successes = np.zeros(num_envs)
     episode_lens = np.zeros(num_envs, dtype=int)
 
-    # Best performance tracking
     best_return = float("-inf")
     best_success = 0.0
 
-    # Rolling window for console print
-    recent_successes = []
-    recent_returns = []
+    recent_successes: List[float] = []
+    recent_returns: List[float] = []
 
-    # Early stopping tracking
-    no_improve_count = 0
     success_streak = 0
     stop_reason = "max_steps"
 
-    # Metric tracking
-    metrics_history = []
-    train_metrics_buffer = defaultdict(list)
+    metrics_history: List[Dict[str, Any]] = []
+    train_metrics_buffer: Dict[str, List[float]] = defaultdict(list)
 
-    # Total environment steps (across all parallel envs)
     total_env_steps = num_envs
-    step = 0
     rewind_saved = False
 
     print(f"{Color.BLUE}>> Training with {num_envs} parallel environments{Color.END}")
 
     while total_env_steps < total_steps:
-        step += 1
-
-        # 1. Action Selection (for all environments)
+        # 1. Action Selection
         if total_env_steps < start_steps:
-            # Random actions for each environment
             actions = np.array([vec_env.action_space.sample() for _ in range(num_envs)])
         else:
-            # Agent selects actions for each environment
             actions = np.array(
                 [agent.select_action(obs[i], eval_mode=False) for i in range(num_envs)]
             )
 
-        # 2. Step all environments in parallel
+        # 2. Parallel Step
         next_obs, rewards, dones, truncateds, infos = vec_env.step(actions)
         terminals = np.logical_or(dones, truncateds)
 
-        # 3. Store transitions for all environments
+        # 3. Store and Track
         for i in range(num_envs):
             replay_buffer.store(
                 obs[i], actions[i], rewards[i], next_obs[i], float(dones[i])
             )
 
-            # Update episode tracking
             episode_returns[i] += rewards[i]
             episode_lens[i] += 1
 
-            # Track success if available in current step's info
-            # In vectorized envs, info structure can vary:
-            # - dict with "final_info" key containing list of final infos
-            # - dict with arrays for each info field
-            # - tuple/list of dicts
             try:
                 if isinstance(infos, dict):
-                    # Check for final_info structure (newer Gymnasium)
                     if "final_info" in infos and i < len(infos["final_info"]):
                         final_info = infos["final_info"][i]
                         if final_info is not None and "success" in final_info:
                             episode_successes[i] = max(
                                 episode_successes[i], float(final_info["success"])
                             )
-                    # Check for direct success array
                     elif "success" in infos and hasattr(
                         infos["success"], "__getitem__"
                     ):
@@ -170,48 +169,41 @@ def run_vectorized_training_loop(
                             episode_successes[i], float(infos["success"][i])
                         )
                 elif isinstance(infos, (list, tuple)) and i < len(infos):
-                    # Old style: list/tuple of dicts
                     if isinstance(infos[i], dict) and "success" in infos[i]:
                         episode_successes[i] = max(
                             episode_successes[i], float(infos[i]["success"])
                         )
             except (KeyError, IndexError, TypeError):
-                # If we can't extract success, just continue
-                # Success will be 0.0 which is the default
                 pass
 
-        # Update counters
         total_env_steps += num_envs
         obs = next_obs
 
         if rewind_steps > 0 and not rewind_saved and total_env_steps >= rewind_steps:
-            print(
-                f"{Color.BLUE}>> Saving Rewind Weights (Step {total_env_steps})...{Color.END}"
-            )
-            checkpointer.save(agent.state, filename="checkpoint_rewind")
-            rewind_saved = True
+            if checkpointer:
+                print(
+                    f"{Color.BLUE}>> Saving Rewind Weights (Step {total_env_steps})...{Color.END}"
+                )
+                checkpointer.save(agent.state, filename="checkpoint_rewind")
+                rewind_saved = True
 
         # 4. Handle episode endings
         for i in range(num_envs):
             if terminals[i]:
-                # Console and disk logging
-                recent_successes.append(episode_successes[i])
-                recent_returns.append(episode_returns[i])
+                recent_successes.append(float(episode_successes[i]))
+                recent_returns.append(float(episode_returns[i]))
                 if len(recent_successes) > 100:
                     recent_successes.pop(0)
                     recent_returns.pop(0)
 
-                # Print for ALL episode completions (matching original loop behavior)
                 color = Color.GREEN if episode_successes[i] >= 1.0 else Color.RED
                 print(
                     f"Step {total_env_steps} | Env {i} | Return: {episode_returns[i]:.1f} | "
                     f"{color}Success: {episode_successes[i]:.2f}{Color.END} | "
-                    f"Avg Succ (100): {np.mean(recent_successes[-100:]):.2f} | "
-                    f"Avg Ret (100): {np.mean(recent_returns[-100:]):.1f} | "
+                    f"Avg Succ (100): {np.mean(recent_successes):.2f} | "
                     f"Elapsed: {(time.time() - start_time)/60:.1f}min"
                 )
 
-                # Disk logging
                 episode_log = {
                     "step": total_env_steps,
                     "env_id": i,
@@ -222,18 +214,13 @@ def run_vectorized_training_loop(
                 }
                 append_to_jsonl(episodes_path, episode_log)
 
-                # Reset tracking for this environment
                 episode_returns[i] = 0.0
                 episode_successes[i] = 0.0
                 episode_lens[i] = 0
 
         # 5. Training Updates
-        # With vectorized envs, we collect data faster, so we might want more updates per step
         if total_env_steps >= start_steps and replay_buffer.is_ready(batch_size):
-            # Scale updates by number of environments to maintain update-to-data ratio
             num_updates = int(updates_per_step * num_envs)
-
-            # Optimization: Do all updates without intermediate Python calls
             for _ in range(num_updates):
                 metrics = agent.update(replay_buffer, batch_size)
                 for k, v in metrics.items():
@@ -244,25 +231,21 @@ def run_vectorized_training_loop(
             total_env_steps >= eval_interval
             and total_env_steps % eval_interval < num_envs
         ):
-            # Create a single eval environment (not vectorized)
             from src.envs.factory import make_metaworld_env
 
             eval_env, _, _, _, _ = make_metaworld_env(
                 task_name, max_episode_steps, scale_factor, seed=seed
             )
 
-            # Evaluate
             eval_metrics = evaluate(eval_env, agent, num_episodes=eval_episodes)
             eval_env.close()
 
-            # Aggregate training metrics
             avg_train_metrics = {
                 f"train/{k}": np.mean(v) if v else 0.0
                 for k, v in train_metrics_buffer.items()
             }
             train_metrics_buffer = defaultdict(list)
 
-            # Combine all metrics
             current_log = {
                 "step": total_env_steps,
                 "wall_time": time.time() - start_time,
@@ -270,11 +253,8 @@ def run_vectorized_training_loop(
                 **avg_train_metrics,
             }
             metrics_history.append(current_log)
-
-            # Disk logging
             append_to_jsonl(metrics_path, current_log)
 
-            # Console output
             mean_ret = eval_metrics["mean_return"]
             mean_succ = eval_metrics["mean_success"]
 
@@ -282,26 +262,20 @@ def run_vectorized_training_loop(
                 f"[Eval] Step {total_env_steps:>7} | "
                 f"Ret: {mean_ret:>6.1f} | "
                 f"Succ: {mean_succ:>4.2f} | "
-                f"CriticL: {avg_train_metrics.get('train/critic_loss', 0):.2f} | "
                 f"Alpha: {agent.alpha:.3f}"
             )
 
-            checkpointer.save(
-                agent.state,
-                filename=f"checkpoint_step_{total_env_steps}",
-            )
+            if checkpointer:
+                checkpointer.save(
+                    agent.state, filename=f"checkpoint_step_{total_env_steps}"
+                )
 
-            if mean_ret > best_return:
-                best_return = mean_ret
-                best_success = mean_succ
-                no_improve_count = 0
+                if mean_ret > best_return:
+                    best_return = mean_ret
+                    best_success = mean_succ
+                    checkpointer.save(agent.state, filename="checkpoint_best")
+                    print(f"  {Color.BLUE}>> New Best Model Saved{Color.END}")
 
-                checkpointer.save(agent.state, filename="checkpoint_best")
-                print(f"  {Color.BLUE}>> New Best Model Saved{Color.END}")
-            else:
-                no_improve_count += 1
-
-            # Early stopping
             if target_mean_success is not None:
                 if mean_succ >= target_mean_success:
                     success_streak += 1
@@ -313,9 +287,9 @@ def run_vectorized_training_loop(
                     stop_reason = "early_stopping"
                     break
 
-    # Final save
-    print(f"{Color.BLUE}>> Saving Final Model...{Color.END}")
-    checkpointer.save(agent.state, filename="checkpoint_final")
+    if checkpointer:
+        print(f"{Color.BLUE}>> Saving Final Model...{Color.END}")
+        checkpointer.save(agent.state, filename="checkpoint_final")
 
     stats = {
         "task": task_name,
@@ -328,9 +302,7 @@ def run_vectorized_training_loop(
         "metrics_history": metrics_history,
     }
 
-    # Close vectorized environment
     vec_env.close()
-
     return stats
 
 
@@ -352,74 +324,83 @@ def run_training_loop(
     checkpointer: Optional[Checkpointer] = None,
     rewind_steps: int = 0,
 ) -> Dict[str, Any]:
-    """Core training loop for SAC agent with LTH support (single environment)."""
+    """Core training loop for SAC agent in a single environment.
+
+    Args:
+        env: Single gymnasium environment.
+        agent: The SAC agent instance.
+        replay_buffer: Buffer for storing transitions.
+        total_steps: Total number of environment steps.
+        start_steps: Initial random exploration steps.
+        batch_size: Training batch size.
+        eval_interval: Periodic evaluation frequency.
+        save_dir: Logging and checkpoint directory.
+        seed: Random seed.
+        task_name: Environment task name.
+        target_mean_success: Optional threshold for early stopping.
+        patience: Evaluations to wait for success streak.
+        updates_per_step: Gradient updates per step.
+        eval_episodes: Evaluation episode count.
+        checkpointer: Utility for model saving.
+        rewind_steps: Step at which to save rewind weights.
+
+    Returns:
+        Final training statistics and history.
+    """
     start_time = time.time()
 
-    # 0. Setup Logging Files
     os.makedirs(save_dir, exist_ok=True)
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
     episodes_path = os.path.join(save_dir, "train_episodes.jsonl")
 
-    # Wipe files if they exist
     if os.path.exists(metrics_path):
         os.remove(metrics_path)
     if os.path.exists(episodes_path):
         os.remove(episodes_path)
 
-    # Reset environment
     obs, _ = env.reset(seed=seed)
 
-    # Episode tracking
     episode_return = 0.0
     episode_success = 0.0
     episode_len = 0
 
-    # Best performance tracking
     best_return = float("-inf")
     best_success = 0.0
 
-    # Rolling window for console print
-    recent_successes = []
-    recent_returns = []
+    recent_successes: List[float] = []
+    recent_returns: List[float] = []
 
-    # Early stopping tracking
-    no_improve_count = 0
     success_streak = 0
     stop_reason = "max_steps"
 
-    # Metric tracking
-    metrics_history = []
-    train_metrics_buffer = defaultdict(list)
-
-    step = 0
+    metrics_history: List[Dict[str, Any]] = []
+    train_metrics_buffer: Dict[str, List[float]] = defaultdict(list)
 
     for step in range(1, total_steps + 1):
-        if rewind_steps > 0 and step == rewind_steps:
+        if rewind_steps > 0 and step == rewind_steps and checkpointer:
             print(f"{Color.BLUE}>> Saving Rewind Weights (Step {step})...{Color.END}")
             checkpointer.save(agent.state, filename="checkpoint_rewind")
+
         # 1. Action Selection
         if step < start_steps:
             action = env.action_space.sample()
         else:
             action = agent.select_action(obs, eval_mode=False)
 
-        # 2. Environment Step
+        # 2. Step
         next_obs, reward, done, truncated, info = env.step(action)
-
         terminal = done or truncated
 
-        # 3. Store Transition
+        # 3. Store
         replay_buffer.store(obs, action, reward, next_obs, float(done))
 
-        # Update tracking
         obs = next_obs
-        episode_return += reward
+        episode_return += float(reward)
         episode_success = max(episode_success, float(info.get("success", 0.0)))
         episode_len += 1
 
         # 4. Handle Episode End
         if terminal:
-            # Console logging
             recent_successes.append(episode_success)
             recent_returns.append(episode_return)
             if len(recent_successes) > 100:
@@ -430,12 +411,9 @@ def run_training_loop(
                 print(
                     f"Step {step} | Return: {episode_return:.1f} | "
                     f"{color}Success: {episode_success}{Color.END} | "
-                    f"Avg Succ (100): {np.mean(recent_successes[-100:]):.2f} | "
-                    f"Avg Ret (100): {np.mean(recent_returns[-100:]):.1f} | "
                     f"Elapsed: {(time.time() - start_time)/60:.1f}min"
                 )
 
-            # Disk logging
             episode_log = {
                 "step": step,
                 "episode_return": episode_return,
@@ -445,7 +423,6 @@ def run_training_loop(
             }
             append_to_jsonl(episodes_path, episode_log)
 
-            # Reset
             obs, _ = env.reset()
             episode_return = 0.0
             episode_success = 0.0
@@ -460,17 +437,14 @@ def run_training_loop(
 
         # 6. Evaluation & Logging
         if step % eval_interval == 0:
-            # Evaluate
             eval_metrics = evaluate(env, agent, num_episodes=eval_episodes)
 
-            # Aggregate training metrics
             avg_train_metrics = {
                 f"train/{k}": np.mean(v) if v else 0.0
                 for k, v in train_metrics_buffer.items()
             }
             train_metrics_buffer = defaultdict(list)
 
-            # Combine all metrics
             current_log = {
                 "step": step,
                 "wall_time": time.time() - start_time,
@@ -478,34 +452,22 @@ def run_training_loop(
                 **avg_train_metrics,
             }
             metrics_history.append(current_log)
-
-            # Disk logging
             append_to_jsonl(metrics_path, current_log)
 
-            # Console output
             mean_ret = eval_metrics["mean_return"]
             mean_succ = eval_metrics["mean_success"]
 
             print(
-                f"[Eval] Step {step:>7} | "
-                f"Ret: {mean_ret:>6.1f} | "
-                f"Succ: {mean_succ:>4.2f} | "
-                f"CriticL: {avg_train_metrics.get('train/critic_loss', 0):.2f} | "
-                f"Alpha: {agent.alpha:.3f}"
+                f"[Eval] Step {step:>7} | Ret: {mean_ret:>6.1f} | Succ: {mean_succ:>4.2f}"
             )
 
-            # Save Checkpoints
-            if mean_ret > best_return:
-                best_return = mean_ret
-                best_success = mean_succ
-                no_improve_count = 0
+            if checkpointer:
+                if mean_ret > best_return:
+                    best_return = mean_ret
+                    best_success = mean_succ
+                    checkpointer.save(agent.state, filename="checkpoint_best")
+                    print(f"  {Color.BLUE}>> New Best Model Saved{Color.END}")
 
-                checkpointer.save(agent.state, filename="checkpoint_best")
-                print(f"  {Color.BLUE}>> New Best Model Saved{Color.END}")
-            else:
-                no_improve_count += 1
-
-            # Early Stopping
             if target_mean_success is not None:
                 if mean_succ >= target_mean_success:
                     success_streak += 1
@@ -517,11 +479,11 @@ def run_training_loop(
                     stop_reason = "early_stopping"
                     break
 
-    # Final Save
-    print(f"{Color.BLUE}>> Saving Final Model...{Color.END}")
-    checkpointer.save(agent.state, filename="checkpoint_final")
+    if checkpointer:
+        print(f"{Color.BLUE}>> Saving Final Model...{Color.END}")
+        checkpointer.save(agent.state, filename="checkpoint_final")
 
-    stats = {
+    return {
         "task": task_name,
         "seed": seed,
         "stop_reason": stop_reason,
@@ -530,5 +492,3 @@ def run_training_loop(
         "wall_time_sec": time.time() - start_time,
         "metrics_history": metrics_history,
     }
-
-    return stats

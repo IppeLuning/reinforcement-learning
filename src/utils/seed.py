@@ -7,23 +7,26 @@ import numpy as np
 
 def set_seed(seed: int = 42):
     """
-    Set random seeds for Python, NumPy, and JAX to ensure reproducibility.
+    Sets seeds for Python and NumPy, and initializes the JAX key.
 
     Args:
         seed (int): The integer seed to use.
+
+    Returns:
+        jax.random.PRNGKey: The root random key for JAX operations.
     """
-    # 1. Python's built-in random
+    # 1. Python random
     random.seed(seed)
 
     # 2. NumPy
     np.random.seed(seed)
 
-    # 3. JAX (Global Key)
-    # While JAX is functional and usually requires passing keys explicitly,
-    # setting the global configuration or the first key is often useful context.
-    # Note: JAX operations are deterministic given the same PRNGKey.
+    # 3. JAX (Stateless)
+    key = jax.random.key(seed)
 
-    # 4. OS Environment (Optional but recommended for some libraries)
+    # 4. OS Environment
     os.environ["PYTHONHASHSEED"] = str(seed)
 
     print(f"Global seed set to: {seed}")
+
+    return key

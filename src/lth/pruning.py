@@ -1,61 +1,66 @@
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
+from typing import List, Optional
 
 import jax
 import jax.numpy as jnp
 
+from src.utils.types import Mask, Params
+
 
 def prune_kernels_by_magnitude(
-    params: Any,
+    params: Params,
     target_sparsity: float = 0.8,
-    prev_mask: Optional[Any] = None,  # <--- Added Argument
-) -> Any:
+    prev_mask: Optional[Mask] = None,
+) -> Mask:
+    """Performs global magnitude pruning on model kernels.
+
+    This function implements research-grade Lottery Ticket Hypothesis (LTH) pruning.
+    It identifies a global threshold across all 'kernel' parameters in the PyTree
+    while leaving biases and non-kernel parameters untouched (fully kept).
+    It supports iterative pruning by ensuring that weights already pruned in
+    `prev_mask` remain pruned.
+
+    Args:
+        params: The model parameters (PyTree) to prune.
+        target_sparsity: The fraction of weights to prune (e.g., 0.8 means 80% pruned).
+        prev_mask: Optional mask from a previous pruning iteration.
+            If provided, the new mask will be the intersection of the new
+            magnitude mask and this previous mask.
+
+    Returns:
+        A PyTree matching the structure of `params` containing binary values
+        (1.0 for kept, 0.0 for pruned).
     """
-    Research-Grade LTH Pruning: Prunes GLOBAL kernels only. Biases are kept.
-    Supports Iterative Pruning via prev_mask.
-    """
-    # 1. Identify which leaves are kernels (weights) vs biases
     flat_params_with_path, tree_def = jax.tree_util.tree_flatten_with_path(params)
 
-    # Flatten previous mask if it exists to align with params
     if prev_mask is not None:
         flat_prev_mask, _ = jax.tree_util.tree_flatten(prev_mask)
     else:
-        # Create a dummy list of Nones if no mask exists
         flat_prev_mask = [None] * len(flat_params_with_path)
 
-    # 2. Collect only KERNEL weights for threshold calculation
-    kernel_values = []
+    kernel_values: List[jax.Array] = []
     for (path, param), prev_m_leaf in zip(flat_params_with_path, flat_prev_mask):
         is_kernel = any(
             isinstance(node, jax.tree_util.DictKey) and node.key == "kernel"
             for node in path
         )
         if is_kernel:
-            # If we have a previous mask, we can forcefully treat those weights as 0.0
-            # (Though usually they are already 0.0 in params if trained with masking)
             if prev_m_leaf is not None:
-                # Use the mask to ensure we are looking at the 'effective' weight
                 val = jnp.abs(param * prev_m_leaf).flatten()
             else:
                 val = jnp.abs(param).flatten()
 
             kernel_values.append(val)
 
-    # Concatenate only kernels
     all_kernels = jnp.concatenate(kernel_values)
 
-    # 3. Determine threshold from KERNELS only
-    # Note: Weights that were previously pruned (0.0) will be at the bottom
-    # of this sorted list, so they are automatically selected to be pruned again.
     k = int(len(all_kernels) * target_sparsity)
     threshold = jnp.sort(all_kernels)[k]
 
     print(f"  > Global Kernel Threshold: {threshold:.6e}")
 
-    # 4. Create Mask (Apply pruning ONLY to kernels)
-    # We cannot use tree_map_with_path easily with two trees (params + prev_mask),
-    # so we iterate manually over the flattened lists and reconstruct.
-    flat_new_masks = []
+    flat_new_masks: List[jax.Array] = []
 
     for (path, param), prev_m_leaf in zip(flat_params_with_path, flat_prev_mask):
         is_kernel = any(
@@ -64,20 +69,34 @@ def prune_kernels_by_magnitude(
         )
 
         if is_kernel:
-            # Prune if below threshold
-            # Strict inequality (> threshold) ensures 0.0s remain 0
             new_leaf = (jnp.abs(param) > threshold).astype(jnp.float32)
 
-            # Enforce previous mask (Iterative Safety Net)
             if prev_m_leaf is not None:
                 new_leaf = new_leaf * prev_m_leaf
 
             flat_new_masks.append(new_leaf)
         else:
-            # Keep biases/others 100% intact
             flat_new_masks.append(jnp.ones_like(param))
 
-    # Reconstruct the tree
-    mask = jax.tree_util.tree_unflatten(tree_def, flat_new_masks)
+    mask: Mask = jax.tree_util.tree_unflatten(tree_def, flat_new_masks)
 
     return mask
+
+
+def compute_sparsity(mask: Mask) -> float:
+    """Computes the global sparsity of a pruning mask.
+
+    Sparsity is defined as the percentage of zeros in the mask relative
+    to the total number of parameters.
+
+    Args:
+        mask: The binary pruning mask (PyTree).
+
+    Returns:
+        The sparsity as a float between 0.0 and 1.0.
+    """
+    flat_mask, _ = jax.tree.flatten(mask)
+    total_params = sum(m.size for m in flat_mask)
+    nonzero_params = sum(jnp.sum(m).item() for m in flat_mask)
+
+    return 1.0 - (float(nonzero_params) / total_params)

@@ -7,3 +7,7 @@ uv.lock
 results_test/
 masks/
 experiments/
+notebooks/
+test.py
+
+notebook/

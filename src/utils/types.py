@@ -1,12 +1,3 @@
-"""Type aliases and dataclasses for JAX RL implementation.
-
-DISCLAIMER: This code was written by Claude Opus 4.5 on 2026-01-12
-and reviewed by Marinus van den Ende.
-
-This module provides consistent type definitions used throughout the codebase,
-improving readability and enabling static type checking.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,31 +7,25 @@ import jax
 import jax.numpy as jnp
 from flax.core import FrozenDict
 
-# =============================================================================
-# Type Aliases
-# =============================================================================
-
-# JAX random key type
 PRNGKey = jax.Array
+"""A JAX random key array."""
 
-# Flax parameter pytree (nested dict of arrays)
 Params = FrozenDict[str, Any]
+"""A PyTree of model parameters (typically from Flax)."""
 
-# Generic pytree for masks (same structure as Params but with binary values)
 Mask = FrozenDict[str, Any]
+"""A PyTree of binary values (0.0 or 1.0) used for weight pruning."""
 
-# Dictionary of scalar metrics for logging
 Metrics = Dict[str, float]
-
-
-# =============================================================================
-# Data Structures
-# =============================================================================
+"""A dictionary mapping metric names to their scalar values."""
 
 
 class Batch(NamedTuple):
     """A batch of transitions sampled from the replay buffer.
-    
+
+    This structure is a NamedTuple to ensure it is treated as a valid JAX PyTree leaf
+    or container, making it compatible with JIT-compiled functions.
+
     Attributes:
         obs: Observations of shape (batch_size, obs_dim).
         actions: Actions taken of shape (batch_size, act_dim).
@@ -48,6 +33,7 @@ class Batch(NamedTuple):
         next_obs: Next observations of shape (batch_size, obs_dim).
         dones: Terminal flags of shape (batch_size, 1).
     """
+
     obs: jax.Array
     actions: jax.Array
     rewards: jax.Array
@@ -58,17 +44,26 @@ class Batch(NamedTuple):
 @dataclass(frozen=True)
 class ActionBounds:
     """Action space bounds for continuous control.
-    
+
     Attributes:
-        low: Lower bounds for each action dimension.
-        high: Upper bounds for each action dimension.
+        low: Lower bounds for each action dimension as a JAX array.
+        high: Upper bounds for each action dimension as a JAX array.
     """
+
     low: jax.Array
     high: jax.Array
-    
+
     @classmethod
-    def from_numpy(cls, low, high) -> "ActionBounds":
-        """Create ActionBounds from numpy arrays."""
+    def from_numpy(cls, low: Any, high: Any) -> ActionBounds:
+        """Creates ActionBounds from numpy or array-like inputs.
+
+        Args:
+            low: Array-like object representing lower bounds.
+            high: Array-like object representing upper bounds.
+
+        Returns:
+            An instance of ActionBounds containing JAX float32 arrays.
+        """
         return cls(
             low=jnp.asarray(low, dtype=jnp.float32),
             high=jnp.asarray(high, dtype=jnp.float32),
@@ -78,9 +73,18 @@ class ActionBounds:
 @dataclass
 class TransitionData:
     """Raw transition data before batching.
-    
-    Used for storing individual transitions in the replay buffer.
+
+    Used for storing individual transitions in the replay buffer before they
+    are stacked into a Batch.
+
+    Attributes:
+        obs: The environment observation array.
+        action: The action taken by the agent.
+        reward: The scalar reward received.
+        next_obs: The subsequent environment observation.
+        done: A float flag (1.0 for true, 0.0 for false) indicating episode termination.
     """
+
     obs: jax.Array
     action: jax.Array
     reward: float

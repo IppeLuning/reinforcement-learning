@@ -1,18 +1,8 @@
-"""
-Step 2: Create Lottery Ticket Masks.
-
-This module defines the 'create_mask' function called by run_pipeline.py.
-It loads the trained weights from the previous round, applies pruning (magnitude or gradient),
-and saves the new masks. It supports iterative pruning by accepting a previous mask.
-"""
+from __future__ import annotations
 
 import os
 import pickle
 from typing import Any, Dict, Optional
-
-import jax
-import jax.numpy as jnp
-import yaml
 
 from src.agents import SACAgent, SACConfig
 from src.data import ReplayBuffer
@@ -24,6 +14,7 @@ from src.lth import (
     prune_kernels_by_magnitude,
 )
 from src.utils import Checkpointer, set_seed
+from src.utils.types import Mask
 
 
 def create_mask(
@@ -32,31 +23,35 @@ def create_mask(
     seed: int,
     ckpt_dir: str,
     mask_out_path: str,
-    target_sparsity_actor: float,  # <--- UPDATED: Separate target for Actor
-    target_sparsity_critic: float,  # <--- UPDATED: Separate target for Critic
+    target_sparsity_actor: float,
+    target_sparsity_critic: float,
     pruning_method: str = "magnitude",
     prev_mask_path: Optional[str] = None,
 ) -> None:
-    """
-    Executes Step 2 of the LTH pipeline:
-    1. Loads trained weights (checkpoint_best) from the PREVIOUS round (ckpt_dir).
-    2. Loads the PREVIOUS mask (if any) to ensure consistent pruning.
-    3. Prunes Actor and Critic parameters to their RESPECTIVE targets.
-    4. Saves the resulting masks to 'mask_out_path'.
+    """Executes Step 2 of the LTH pipeline: Generates binary pruning masks.
+
+    This function identifies the "Winning Ticket" by:
+    1. Loading the high-performance weights from the previous training round.
+    2. Analyzing parameter importance via magnitude or gradient-based saliency.
+    3. Intersection with the previous mask to ensure "once pruned, always pruned."
+    4. Saving a new binary mask PyTree for use in the next retraining round.
 
     Args:
-        cfg: Configuration dictionary.
-        task_name: Name of the task.
-        seed: Random seed.
-        ckpt_dir: Directory containing checkpoints (from previous round).
-        mask_out_path: Path to save the new mask.
-        target_sparsity_actor: Target sparsity for the Actor network (0.0 to 1.0).
-        target_sparsity_critic: Target sparsity for the Critic network (0.0 to 1.0).
-        pruning_method: "magnitude" or "gradient".
-        prev_mask_path: Path to the mask from the previous round (optional).
+        cfg: Global configuration dictionary.
+        task_name: Name of the Meta-World task.
+        seed: Random seed for environment initialization.
+        ckpt_dir: Directory containing the trained checkpoints from the previous round.
+        mask_out_path: File path where the resulting mask dictionary will be saved.
+        target_sparsity_actor: Target fraction of actor weights to prune (0.0 to 1.0).
+        target_sparsity_critic: Target fraction of critic weights to prune (0.0 to 1.0).
+        pruning_method: The importance criterion to use ("magnitude" or "gradient").
+        prev_mask_path: Optional path to a mask from a prior iterative pruning round.
+
+    Raises:
+        FileNotFoundError: If the required checkpoints or replay buffers are missing.
+        ValueError: If an unsupported pruning method is specified.
     """
 
-    # 1. Safety Checks
     if os.path.exists(mask_out_path):
         print(f"  [Skip] Mask already exists: {mask_out_path}")
         return
@@ -69,18 +64,16 @@ def create_mask(
     )
 
     # 2. Re-Initialize Agent (To get the correct State structure for loading)
-    hp = cfg["hyperparameters"]
-    defaults = hp["defaults"]
-    task_overrides = hp.get("tasks", {}).get(task_name, {})
-    params = {**defaults, **task_overrides}
+    hp: Dict[str, Any] = cfg["hyperparameters"]
+    defaults: Dict[str, Any] = hp["defaults"]
+    task_overrides: Dict[str, Any] = hp.get("tasks", {}).get(task_name, {})
+    params: Dict[str, Any] = {**defaults, **task_overrides}
 
-    # Setup dummy env just to get shapes
     set_seed(seed)
     env, obs_dim, act_dim, act_low, act_high = make_metaworld_env(
         task_name, hp["max_episode_steps"], params["scale_rewards"], seed
     )
 
-    # Initialize empty agent
     sac_config = SACConfig(
         gamma=params.get("gamma", 0.99),
         tau=params.get("tau", 0.005),
@@ -105,8 +98,8 @@ def create_mask(
 
     # 3. Load the Weights from Previous Round
     checkpointer = Checkpointer(ckpt_dir)
-
     restored_state = checkpointer.restore(agent.state, item="checkpoint_best.pkl")
+
     if restored_state is None:
         print(
             "    ! 'checkpoint_best.pkl' not found, falling back to 'checkpoint_final.pkl'"
@@ -119,19 +112,18 @@ def create_mask(
     agent.state = restored_state
 
     # 4. Load Previous Mask (for Iterative Pruning)
-    prev_actor_mask = None
-    prev_critic_mask = None
+    prev_actor_mask: Optional[Mask] = None
+    prev_critic_mask: Optional[Mask] = None
 
     if prev_mask_path and os.path.exists(prev_mask_path):
         print(f"    Loading previous mask from: {prev_mask_path}")
         with open(prev_mask_path, "rb") as f:
-            prev_data = pickle.load(f)
+            prev_data: Dict[str, Any] = pickle.load(f)
             prev_actor_mask = prev_data["actor"]
             prev_critic_mask = prev_data["critic"]
 
     # 5. Prune Parameters
     if pruning_method == "magnitude":
-        # MAGNITUDE-BASED PRUNING
         print(f"    Pruning Actor to {target_sparsity_actor:.2%} (magnitude)...")
         actor_mask = prune_kernels_by_magnitude(
             restored_state.actor_params,
@@ -147,22 +139,20 @@ def create_mask(
         )
 
     elif pruning_method == "gradient":
-        # GRADIENT-BASED PRUNING
-        gradient_method = cfg.get("pruning", {}).get("gradient_method", "taylor")
-        num_gradient_batches = cfg.get("pruning", {}).get("num_gradient_batches", 100)
-        gradient_batch_size = cfg.get("pruning", {}).get("gradient_batch_size", 256)
+        gradient_method: str = cfg.get("pruning", {}).get("gradient_method", "taylor")
+        num_gradient_batches: int = cfg.get("pruning", {}).get(
+            "num_gradient_batches", 100
+        )
+        gradient_batch_size: int = cfg.get("pruning", {}).get(
+            "gradient_batch_size", 256
+        )
 
-        # Load replay buffer from the PREVIOUS ROUND directory
-        replay_path = os.path.join(ckpt_dir, "replay_buffer.pkl")
+        replay_path: str = os.path.join(ckpt_dir, "replay_buffer.pkl")
         if not os.path.exists(replay_path):
-            raise FileNotFoundError(
-                f"Replay buffer not found at {replay_path}. "
-                "Gradient pruning requires saved replay buffer from the training run."
-            )
+            raise FileNotFoundError(f"Replay buffer not found at {replay_path}.")
 
-        print(f"    Loading replay buffer from {replay_path}")
         with open(replay_path, "rb") as f:
-            replay_data = pickle.load(f)
+            replay_data: Dict[str, Any] = pickle.load(f)
 
         replay_buffer = ReplayBuffer.create(
             obs_dim=obs_dim,
@@ -170,12 +160,7 @@ def create_mask(
             capacity=replay_data["capacity"],
         )
         replay_buffer.load(replay_data)
-        print(f"    Replay buffer size: {replay_buffer.size}")
 
-        # Compute gradients
-        print(
-            f"    Computing gradients ({gradient_method}) over {num_gradient_batches} batches..."
-        )
         actor_grads, critic_grads = accumulate_gradient_statistics(
             agent=agent,
             replay_buffer=replay_buffer,
@@ -184,14 +169,13 @@ def create_mask(
             normalize_obs=True,
         )
 
-        # Prune using gradient saliency
         print(
             f"    Pruning Actor to {target_sparsity_actor:.2%} ({gradient_method} saliency)..."
         )
         actor_mask = prune_kernels_by_gradient_saliency(
             params=restored_state.actor_params,
             gradients=actor_grads,
-            target_sparsity=target_sparsity_actor,  # Use Actor Target
+            target_sparsity=target_sparsity_actor,
             method=gradient_method,
             prev_mask=prev_actor_mask,
         )
@@ -202,7 +186,7 @@ def create_mask(
         critic_mask = prune_kernels_by_gradient_saliency(
             params=restored_state.critic_params,
             gradients=critic_grads,
-            target_sparsity=target_sparsity_critic,  # Use Critic Target
+            target_sparsity=target_sparsity_critic,
             method=gradient_method,
             prev_mask=prev_critic_mask,
         )
@@ -210,29 +194,25 @@ def create_mask(
         raise ValueError(f"Unknown pruning_method: {pruning_method}")
 
     # 6. Verify Sparsity
-    act_sp = compute_sparsity(actor_mask)
-    crit_sp = compute_sparsity(critic_mask)
+    act_sp: float = compute_sparsity(actor_mask)
+    crit_sp: float = compute_sparsity(critic_mask)
     print(f"    > Actual Actor Sparsity: {act_sp:.2%}")
     print(f"    > Actual Critic Sparsity: {crit_sp:.2%}")
 
     # 7. Save Masks
-    mask_data = {
+    mask_data: Dict[str, Any] = {
         "actor": actor_mask,
         "critic": critic_mask,
-        "sparsity_target_actor": target_sparsity_actor,  # Save metadata
-        "sparsity_target_critic": target_sparsity_critic,  # Save metadata
+        "sparsity_target_actor": target_sparsity_actor,
+        "sparsity_target_critic": target_sparsity_critic,
         "pruning_method": pruning_method,
         "task": task_name,
         "seed": seed,
     }
 
-    # Ensure directory exists
     os.makedirs(os.path.dirname(mask_out_path), exist_ok=True)
-
     with open(mask_out_path, "wb") as f:
         pickle.dump(mask_data, f)
 
     print(f"  > Mask saved to {mask_out_path}")
-
-    # Cleanup
     env.close()

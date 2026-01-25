@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
@@ -20,16 +20,16 @@ class ReplayBuffer:
     only when sampling. This is more memory-efficient for large buffers.
 
     Attributes:
-        obs_dim: Dimension of observations.
-        act_dim: Dimension of actions.
-        max_size: Maximum number of transitions to store.
-        size: Current number of transitions stored.
-        ptr: Current write position in the circular buffer.
-
-    Example:
-        >>> buffer = ReplayBuffer(obs_dim=10, act_dim=4, max_size=100000)
-        >>> buffer.store(obs, action, reward, next_obs, done)
-        >>> batch = buffer.sample(batch_size=256)
+        obs_dim (int): Dimension of observations.
+        act_dim (int): Dimension of actions.
+        max_size (int): Maximum number of transitions to store.
+        obs_buf (np.ndarray): Buffer for observations.
+        next_obs_buf (np.ndarray): Buffer for next observations.
+        action_buf (np.ndarray): Buffer for actions.
+        reward_buf (np.ndarray): Buffer for rewards.
+        done_buf (np.ndarray): Buffer for terminal flags.
+        ptr (int): Current write position in the circular buffer.
+        size (int): Current number of transitions stored.
     """
 
     def __init__(
@@ -37,27 +37,26 @@ class ReplayBuffer:
         obs_dim: int,
         act_dim: int,
         max_size: int = 1_000_000,
-    ):
-        """Initialize the replay buffer.
+    ) -> None:
+        """Initializes the replay buffer.
 
         Args:
             obs_dim: Dimension of observations.
             act_dim: Dimension of actions.
             max_size: Maximum number of transitions to store.
         """
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.max_size = max_size
+        self.obs_dim: int = obs_dim
+        self.act_dim: int = act_dim
+        self.max_size: int = max_size
 
-        # Preallocate arrays
-        self.obs_buf = np.zeros((max_size, obs_dim), dtype=np.float32)
-        self.next_obs_buf = np.zeros((max_size, obs_dim), dtype=np.float32)
-        self.action_buf = np.zeros((max_size, act_dim), dtype=np.float32)
-        self.reward_buf = np.zeros((max_size, 1), dtype=np.float32)
-        self.done_buf = np.zeros((max_size, 1), dtype=np.float32)
+        self.obs_buf: np.ndarray = np.zeros((max_size, obs_dim), dtype=np.float32)
+        self.next_obs_buf: np.ndarray = np.zeros((max_size, obs_dim), dtype=np.float32)
+        self.action_buf: np.ndarray = np.zeros((max_size, act_dim), dtype=np.float32)
+        self.reward_buf: np.ndarray = np.zeros((max_size, 1), dtype=np.float32)
+        self.done_buf: np.ndarray = np.zeros((max_size, 1), dtype=np.float32)
 
-        self.ptr = 0
-        self.size = 0
+        self.ptr: int = 0
+        self.size: int = 0
 
     def store(
         self,
@@ -67,7 +66,7 @@ class ReplayBuffer:
         next_obs: np.ndarray,
         done: float,
     ) -> None:
-        """Store a single transition in the buffer.
+        """Stores a single transition in the buffer.
 
         Args:
             obs: Observation, shape (obs_dim,).
@@ -90,17 +89,16 @@ class ReplayBuffer:
         batch_size: int,
         key: Optional[jax.Array] = None,
     ) -> Batch:
-        """Sample a random batch of transitions.
+        """Samples a random batch of transitions.
 
         Args:
             batch_size: Number of transitions to sample.
             key: Optional JAX random key. If None, uses NumPy random.
 
         Returns:
-            Batch named tuple containing JAX arrays.
+            A Batch object containing sampled transitions as JAX arrays.
         """
         if key is not None:
-            # Use JAX random for reproducibility
             indices = jax.random.randint(
                 key, shape=(batch_size,), minval=0, maxval=self.size
             )
@@ -117,25 +115,29 @@ class ReplayBuffer:
         )
 
     def __len__(self) -> int:
-        """Return current number of stored transitions."""
+        """Returns the current number of stored transitions.
+
+        Returns:
+            The integer count of elements in the buffer.
+        """
         return self.size
 
     def is_ready(self, batch_size: int) -> bool:
-        """Check if buffer has enough samples for a batch.
+        """Checks if the buffer has enough samples for a batch.
 
         Args:
             batch_size: Desired batch size.
 
         Returns:
-            True if buffer has at least batch_size transitions.
+            True if the buffer size is greater than or equal to batch_size.
         """
         return self.size >= batch_size
 
-    def save(self) -> dict:
-        """Save buffer state to a dictionary.
+    def save(self) -> Dict[str, Any]:
+        """Saves the buffer state to a dictionary.
 
         Returns:
-            Dictionary containing buffer data and metadata.
+            A dictionary containing all buffer data arrays and metadata.
         """
         return {
             "obs_buf": self.obs_buf[: self.size],
@@ -149,11 +151,11 @@ class ReplayBuffer:
             "size": self.size,
         }
 
-    def load(self, data: dict) -> None:
-        """Load buffer state from a dictionary.
+    def load(self, data: Dict[str, Any]) -> None:
+        """Loads buffer state from a dictionary.
 
         Args:
-            data: Dictionary containing buffer data from save().
+            data: Dictionary containing buffer data from a previous save() call.
         """
         size = data["size"]
         self.obs_buf[:size] = data["obs_buf"]
@@ -165,8 +167,8 @@ class ReplayBuffer:
         self.ptr = size % self.max_size
 
     @classmethod
-    def create(cls, obs_dim: int, act_dim: int, capacity: int) -> "ReplayBuffer":
-        """Factory method to create a new buffer (for consistency with load).
+    def create(cls, obs_dim: int, act_dim: int, capacity: int) -> ReplayBuffer:
+        """Factory method to create a new buffer.
 
         Args:
             obs_dim: Dimension of observations.
@@ -174,6 +176,6 @@ class ReplayBuffer:
             capacity: Maximum buffer size.
 
         Returns:
-            New ReplayBuffer instance.
+            A new instance of ReplayBuffer.
         """
         return cls(obs_dim=obs_dim, act_dim=act_dim, max_size=capacity)
