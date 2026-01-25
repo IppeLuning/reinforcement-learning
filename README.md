@@ -1,118 +1,68 @@
-# Reinforcement Learning with Lottery Ticket Hypothesis
+## Transfer of  winning Lottery Tickets in RL (SAC on reach v-3 and push-v3)
 
-A JAX-based implementation of Soft Actor-Critic (SAC) for Meta-World tasks with support for the Lottery Ticket Hypothesis and **parallelized environment execution**.
 
-## 🚀 Quick Start
 
-### Training with Parallelization (Recommended)
+### Architecture
 
-For **4-16x faster** training, use parallelized environments:
+### Architecture & Pipeline
 
-```bash
-# Edit config.yaml to enable parallelization
-# Set environments.parallel.enabled = true
+* **`src/agents/`**: Contains the primary SAC logic and the custom `SACTrainState`. This state is the "heart" of the pruning logic, as it explicitly re-applies binary weight masks during every gradient update to prevent pruned parameters from regenerating.
+* **`src/networks/`**: Implements the Actor (Gaussian policy with Tanh squashing) and the Critic (Twin-Q networks) using Flax Linen MLPs.
+* **`src/lth/`**: The Lottery Ticket Hypothesis toolkit, featuring algorithms for Magnitude pruning and Gradient-based (Taylor expansion) saliency.
+* **`src/data/`**: A high-performance Replay Buffer utilizing NumPy for CPU-side storage to save VRAM, with optimized JAX sampling for training.
 
-python scripts/train_parallel.py
-```
+---
 
-### Standard Training
+#### Experimental Pipeline (`scripts/`)
 
-```bash
-python scripts/_01_train_dense.py
-```
 
-## ⚡ Parallelization Features
+1. **`01_train_dense.py`**: Establishes the performance baseline by training a full-parameter model and saving the initialization and rewind anchors.
+2. **`02_create_mask.py`**: Analyzes the trained dense model to identify essential weights and generates the binary PyTree masks.
+3. **`03_train_ticket.py`**: Performs the "Ticket Run." It rewinds the model to an earlier state, applies the mask, and retrains the sparse network.
+4. **`04_transfer_ticket.py`**: Tests the generality of the discovered tickets by attempting to transfer a sparse mask from a source task (e.g., Reach) to a target task (e.g., Push).
 
-This project now supports **vectorized environment execution** for dramatically faster data collection:
 
-- **Sync Mode**: 8-16x speedup for Meta-World tasks
-- **Async Mode**: Better for variable-duration environments
-- **Easy Configuration**: Just edit `config.yaml`
+---
 
-See **[PARALLELIZATION.md](PARALLELIZATION.md)** for the complete guide.
+### The LTH Pipeline
 
-### Quick Config
+The experiment workflow follows a three-stage iterative process managed by the orchestrator:
 
-```yaml
-environments:
-  parallel:
-    enabled: true      # Enable parallelization
-    num_envs: 8        # Number of parallel environments
-    strategy: "sync"   # 'sync' or 'async'
-```
+1. **Dense Training (Round 0):** Train a standard agent and capture a "rewind anchor" (e.g., at step 20,000).
+2. **Pruning:** Analyze the final trained weights to create a binary mask representing the most salient connections.
+3. **Ticket Retraining:** Rewind the model to the anchor step, apply the mask, and retrain to verify if the sparse subnetwork (the "winning ticket") can match dense performance.
 
-## 📊 Benchmark Performance
+---
 
-Run the benchmark to test speedup on your hardware:
+### Installation
 
 ```bash
-python scripts/benchmark_parallel.py
-```
+# Clone the repository
+git_clone https://github.com/IppeLuning/reinforcement-learning.git
+cd reinforcement-learning
 
-Expected output:
-```
-Single Environment: 120 steps/sec (baseline)
-
-Vectorized Environments:
-Config               Rate (steps/sec)     Speedup
---------------------------------------------------------------------------------
-8 envs (sync)                   960.0        8.00x
-16 envs (sync)                 1680.0       14.00x
-```
-
-## 🏗️ Project Structure
+# Install dependencies
+pip install -r requirements.txt
 
 ```
-src/
-├── agents/          # SAC agent implementation
-├── envs/            # Environment wrappers
-│   ├── factory.py          # Single environment creation
-│   └── vectorized.py       # Parallel environment execution ⚡NEW
-├── training/        # Training loops
-│   ├── loops.py            # Single-env training loop
-│   └── loops_vectorized.py # Vectorized training loop ⚡NEW
-├── lth/             # Lottery Ticket Hypothesis
-├── networks/        # Neural network architectures
-└── utils/           # Utilities
 
-scripts/
-├── train_parallel.py       # Parallelized training ⚡NEW
-├── benchmark_parallel.py   # Performance benchmark ⚡NEW
-├── _01_train_dense.py      # Standard dense training
-├── _02_create_mask.py      # Pruning
-└── _03_train_ticket.py     # Lottery ticket training
+---
+
+### Running Experiments
+
+The entire pipeline is controlled via `run_pipeline.py`.
+
+```python
+python -m run_pipeline
+
 ```
 
-## 📖 Documentation
+#### Configuration
 
-- **[PARALLELIZATION.md](PARALLELIZATION.md)**: Complete parallelization guide
-- **[config.yaml](config.yaml)**: Configuration reference
+All hyperparameters are managed in `config.yaml`, including:
 
-## 🎯 Features
+* `total_steps`: Number of environment steps per round.
+* `rewind_steps`: The anchor step used for Late Rewinding.
+* `parallel`: Settings for vectorized environment collection.
 
-- ✅ JAX-based SAC implementation
-- ✅ Meta-World task support
-- ✅ Lottery Ticket Hypothesis experiments
-- ✅ **Parallelized environment execution** (NEW)
-- ✅ **Sync/Async vectorization strategies** (NEW)
-- ✅ Automatic checkpointing
-- ✅ Comprehensive logging
 
-## 🔧 Requirements
-
-```bash
-pip install jax gymnasium metaworld pyyaml numpy
-```
-
-## 💡 Tips
-
-1. **Start with 8 parallel environments** for best balance of speed and stability
-2. **Use sync strategy** for Meta-World tasks (faster than async)
-3. **Monitor CPU usage** to find optimal `num_envs` for your hardware
-4. **Increase batch_size** when using more parallel environments
-
-## 📚 Learn More
-
-- Vectorized environments use Gymnasium's `VectorEnv` API
-- The vectorized training loop maintains the same learning dynamics as single-env
-- Parallelization only speeds up data collection, not gradient computation

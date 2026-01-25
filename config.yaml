@@ -1,39 +1,26 @@
 environments:
   tasks: 
     - "reach-v3"
-    # - "push-v3" 
-    # - "pick-place-v3"
-  seeds: [2000] # 5 seeds
+    - "push-v3" 
+    - "pick-place-v3"
+  seeds: [2000, 3000, 4000] 
   
-  # Parallelization settings for faster data collection
   parallel:
-    enabled: true           # Set to true to use vectorized environments
-    num_envs: 1        # M3 Mac: 8 is optimal (matches performance cores)
-    strategy: "sync"        # M3 Mac: 'sync' is MUCH faster than 'async'
-    
-    # M3 Mac Optimization:
-    # - 'sync': Runs in single process, no multiprocessing overhead ✓
-    # - 'async': Creates 16 processes, high overhead on M3 ✗
-    # - num_envs: 8 matches M3's 8 performance cores for best balance
-  
-
+    enabled: true          
+    num_envs: 8
+    strategy: "sync"
+   
 hyperparameters:
   total_steps: 150000
   start_steps: 10000
   max_episode_steps: 400
-  batch_size: 2048  # Large batch for better GPU utilization + fewer update calls
+  batch_size: 2048 
   eval_interval: 10000
   replay_buffer_size: 1000000
   hidden_dims: [256, 256]
-  updates_per_step: 1  # With 8 envs: 0.25 × 8 = 2 updates per iteration (instead of 8)
+  updates_per_step: 0.25 
   eval_episodes: 5
   
-  # Optimization strategy:
-  # - 2 updates per loop (8 envs × 0.25) instead of 8
-  # - batch_size 2048 instead of 512
-  # - Result: ~4x faster updates, same sample efficiency
-  
-  # Default Hyperparameters (Base SAC)
   defaults:
     gamma: 0.99
     tau: 0.005
@@ -47,12 +34,10 @@ hyperparameters:
     target_mean_success: 0.8 
     patience: 3            
 
-  # Per-Task Overrides 
   tasks:
     reach-v3:
       init_alpha: 0.2
       scale_rewards: 10
-         # Lower alpha LR = slower alpha decay
 
     push-v3:
       scale_rewards: 10
@@ -62,5 +47,5 @@ hyperparameters:
       scale_rewards: 1
 
 pruning:
-  sparsity: 0.8 #todo: refactor into config
+  sparsity: 0.8
   rewind_steps: 20000
